@@ -10,6 +10,17 @@
 
 This is for you.
 
+## Tested Models
+
+| Model | Parameters | Status | RAM Usage |
+|-------|------------|--------|-----------|
+| BERT | 109.5M | ✅ WORKS | ~800MB |
+| GPT-2 | 124.4M | ✅ WORKS | ~1GB |
+| DistilBERT | 66.4M | ✅ WORKS | ~500MB |
+| DialoGPT | 117M | ✅ WORKS | ~800MB |
+
+All models tested on a regular laptop with 8GB RAM. No GPU required!
+
 ## 🚀 Quick Start
 ```python
 from transformers import AutoModel
