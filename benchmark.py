@@ -77,4 +77,4 @@ print("-"*60)
 for r in results:
     print(f"{r['name']:<15} {r['original']:<12} {r['optimized']:<12} {r['savings']:<10}")
 print("="*60)
-print("\n✅ GPU-Poor makes AI accessible to everyone!")
+print("\nGPU-Poor makes AI accessible to everyone!")

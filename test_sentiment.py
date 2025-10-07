@@ -2,7 +2,7 @@
 from gpu_poor import make_it_work
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 
-print("\n🏚️ GPU-POOR SENTIMENT ANALYSIS\n")
+print("\nGPU-POOR SENTIMENT ANALYSIS\n")
 
 # Load model
 model_name = "distilbert-base-uncased-finetuned-sst-2-english"
@@ -29,4 +29,4 @@ print("\nSentiment Analysis Results:\n")
 for text in texts:
     result = sentiment(text)[0]
     print(f"Text: '{text}'")
-    print(f"→ {result['label']} ({result['score']:.2%})\n")
+    print(f"{result['label']} ({result['score']:.2%})\n")

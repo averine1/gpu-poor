@@ -21,6 +21,8 @@ This is for you.
 
 All models tested on a regular laptop with 8GB RAM. No GPU required!
 
+![alt text](image-1.png)
+
 ## 🚀 Quick Start
 ```python
 from transformers import AutoModel

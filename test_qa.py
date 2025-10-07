@@ -4,7 +4,7 @@ from transformers import pipeline, AutoModelForQuestionAnswering, AutoTokenizer
 import warnings
 warnings.filterwarnings('ignore')
 
-print("\n🏚️ GPU-POOR Q&A DEMO\n")
+print("\nGPU-POOR Q&A DEMO\n")
 
 # Load model
 print("Loading BERT for Question-Answering...")

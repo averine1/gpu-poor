@@ -39,11 +39,11 @@ def test_generation(model_name, prompt="Hello, I am"):
         
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         print(f"Response: '{response}'")
-        print("✅ Success!")
+        print("Success!")
         return True
         
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"Error: {e}")
         return False
 
 import torch
@@ -56,7 +56,7 @@ models_to_test = [
     "cerebras/btlm-3b-8k-base",    # If you want to try bigger
 ]
 
-print("\n🏚️ GPU-POOR TEXT GENERATION TEST\n")
+print("\n GPU-POOR TEXT GENERATION TEST\n")
 
 for model_name in models_to_test:
     try:

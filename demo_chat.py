@@ -6,7 +6,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("=" * 60)
-print(" " * 20 + "🏚️ GPU-POOR DEMO")
+print(" " * 20 + "GPU-POOR DEMO")
 print("=" * 60)
 print("\nRunning AI on your potato computer...\n")
 
@@ -27,12 +27,12 @@ print("=" * 60)
 
 # Chat loop
 chat_history_ids = None
-print("\n💬 Chat with AI (running on CPU):\n")
+print("\nChat with AI (running on CPU):\n")
 
 while True:
     user_input = input("You: ")
     if user_input.lower() in ['quit', 'exit', 'bye']:
-        print("Bot: Goodbye! Thanks for being gpu-poor with me! 🏚️")
+        print("Bot: Goodbye! Thanks for being gpu-poor with me!")
         break
     
     # Encode and generate
