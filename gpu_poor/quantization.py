@@ -28,18 +28,26 @@ class QuantizedLinear(nn.Module):
         self.register_buffer('weight_scale', torch.ones(out_features, 1))
         self.register_buffer('weight_zero_point', torch.zeros(out_features, 1))
         
+        # Add caching for speed
+        self._cached_weight = None
+        self._use_cache = True
+
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter('bias', None)
     
     def forward(self, input):
+        # Use cached weight if available (massive speedup for generation)
+        if self._use_cache and self._cached_weight is not None:
+            return F.linear(input.float(), self._cached_weight, self.bias)
+        
         # Dequantize weights
-        if self.bits == 4:
-            # Unpack 4-bit values (stored as int8)
-            weight_float = (self.weight_quantized.float() - self.weight_zero_point) * self.weight_scale
-        else:
-            weight_float = (self.weight_quantized.float() - self.weight_zero_point) * self.weight_scale
+        weight_float = (self.weight_quantized.float() - self.weight_zero_point) * self.weight_scale
+        
+        # Cache for next time
+        if self._use_cache:
+            self._cached_weight = weight_float.detach()
         
         return F.linear(input.float(), weight_float, self.bias)
     
@@ -49,6 +57,9 @@ class QuantizedLinear(nn.Module):
         weight_data = module.weight.data
         out_features, in_features = weight_data.shape
         
+        qmin = -(2 ** (bits - 1))
+        qmax = (2 ** (bits - 1)) - 1
+
         quantized = QuantizedLinear(in_features, out_features, bits, 
                                    module.bias is not None)
         
@@ -263,13 +274,96 @@ class QuantizedConv1D(nn.Module):
     def forward(self, x):
         # Conv1D in GPT-2 expects (batch, seq, hidden)
         size_out = x.size()[:-1] + (self.nf,)
-        x_flat = x.view(-1, self.nx)
+        x_flat = x.reshape(-1, self.nx)
         
         # Use the quantized linear layer's forward method
         x_out = self.quantized_linear(x_flat)
         
         return x_out.view(size_out)
 
+class QuantizedEmbeddingINT8(nn.Module):
+    """
+    Minimal INT8 embedding with per-row symmetric scales.
+    - Stores weights as int8 and one float32 scale per row.
+    - Dequantizes only the rows used by the current batch (fast on CPU).
+    """
+    def __init__(self, weight_int8: torch.Tensor, scale: torch.Tensor):
+        super().__init__()
+        # [num_embeddings, embedding_dim]
+        self.register_buffer("weight_int8", weight_int8)  # int8
+        self.register_buffer("scale", scale)              # float32
+        # light metadata (handy for debugging)
+        self.num_embeddings = weight_int8.size(0)
+        self.embedding_dim = weight_int8.size(1)
+
+    @classmethod
+    def from_float(cls, emb: nn.Embedding) -> "QuantizedEmbeddingINT8":
+        W = emb.weight.detach()
+        # symmetric per-row scales: max(|row|)/127 (avoid zero scale)
+        scale = W.abs().amax(dim=1).clamp(min=1e-8) / 127.0            # [N]
+        Wq = torch.round(W / scale.unsqueeze(1)).to(torch.int8)        # [N, D]
+        return cls(Wq, scale)
+
+    def forward(self, input_ids: torch.LongTensor) -> torch.Tensor:
+        # Dequantize only the rows we need this step
+        flat = input_ids.view(-1)                                      # [B*T]
+        rows = self.weight_int8.index_select(0, flat).float()          # [B*T, D]
+        s = self.scale.index_select(0, flat).unsqueeze(1)              # [B*T, 1]
+        rows = rows * s                                                # dequant
+        B, T = input_ids.shape
+        D = rows.shape[-1]
+        return rows.view(B, T, D)
+    
+class QuantizedLMHeadINT8(nn.Module):
+    """
+    INT8 LM head with weight tying to embedding.
+    - Stores transposed weight [embed_dim, vocab_size] for efficient matmul
+    - Shares buffers with QuantizedEmbeddingINT8 when weight tying is used
+    """
+    def __init__(self, weight_int8_T: torch.Tensor, scale: torch.Tensor, bias: Optional[torch.Tensor] = None):
+        super().__init__()
+        self.register_buffer("weight_int8_T", weight_int8_T)  # [embed_dim, vocab_size]
+        self.register_buffer("scale", scale)  # [vocab_size]
+        
+        if bias is not None:
+            self.bias = nn.Parameter(bias)
+        else:
+            self.register_parameter("bias", None)
+        
+        self.embed_dim = weight_int8_T.size(0)
+        self.vocab_size = weight_int8_T.size(1)
+        self.weight_shared = False
+
+    @classmethod
+    def from_embedding(cls, qemb: "QuantizedEmbeddingINT8", bias: Optional[torch.Tensor] = None):
+        """Create lm_head from quantized embedding with weight tying."""
+        weight_int8_T = qemb.weight_int8.t().contiguous()  # [vocab, embed] → [embed, vocab]
+        scale = qemb.scale.clone()
+        instance = cls(weight_int8_T, scale, bias)
+        instance.weight_shared = True
+        return instance
+
+    @classmethod
+    def from_float(cls, module: nn.Linear):
+        """Quantize a standalone linear layer to INT8."""
+        W = module.weight.detach()  # [vocab_size, embed_dim]
+        B = module.bias.detach() if module.bias is not None else None
+        
+        scale = W.abs().amax(dim=1).clamp(min=1e-8) / 127.0  # [vocab_size]
+        Wq = torch.round(W / scale.unsqueeze(1)).to(torch.int8)
+        weight_int8_T = Wq.t().contiguous()  # [embed, vocab]
+        
+        return cls(weight_int8_T, scale, B)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Forward: (B, T, D) @ (D, V) → (B, T, V)"""
+        weight_float = self.weight_int8_T.float()  # [D, V]
+        logits = hidden_states @ weight_float  # [..., vocab]
+        logits = logits * self.scale.unsqueeze(0)
+        if self.bias is not None:
+            logits = logits + self.bias
+        return logits
+    
 class LayerSensitivityAnalyzer:
     """Analyzes which layers are sensitive to quantization"""
     
@@ -623,7 +717,7 @@ if __name__ == "__main__":
     """Test the adaptive quantization with GPT-2"""
     import time
     from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    
+
     print("\n" + "="*60)
     print("GPU-POOR: Advanced Adaptive Quantization Test")
     print("="*60)
@@ -698,6 +792,11 @@ if __name__ == "__main__":
             quantized_params += module.quantized_linear.weight_quantized.numel() * 1
             if module.quantized_linear.bias is not None:
                 quantized_params += module.quantized_linear.bias.numel() * 4
+            int8_layers += 1
+        elif isinstance(module, QuantizedEmbeddingINT8):   # <<< NEW
+            # int8 weights (1 byte each) + per-row float32 scale
+            quantized_params += module.weight_int8.numel() * 1
+            quantized_params += module.scale.numel() * 4
             int8_layers += 1
         elif hasattr(module, 'weight'):
             # Non-quantized layers

@@ -4,17 +4,78 @@ Shows all improvements: mixed-precision quantization, speed, model support
 """
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2Tokenizer
+import os
+from copy import deepcopy
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from gpu_poor.hybrid_a3qer import make_it_work_hybrid
 from gpu_poor.fast_inference import OptimizedModel
 from gpu_poor.quantization import QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6, QuantizedConv1D
 import time
 import warnings
 warnings.filterwarnings('ignore')
+import torch, os 
+torch.set_num_threads(os.cpu_count() or 1)  # all CPU cores
+
+def build_gen_kwargs(
+    model,
+    tokenizer,
+    inputs,
+    max_new_tokens=50,
+    do_sample=True,
+    temperature=0.8,
+    top_p=None,
+    top_k=None,
+):
+    """
+    Safe defaults for both causal and encoder–decoder models.
+    - Ensures pad_token_id exists
+    - Sets left padding for causal, right padding for seq2seq
+    - Provides decoder_input_ids for T5-like models
+    """
+    import torch
+
+    # Ensures pad token exists (e.g., GPT-2)
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Base kwargs
+    kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": do_sample,
+        "temperature": temperature,
+        "pad_token_id": tokenizer.pad_token_id,
+    }
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    if top_k is not None:
+        kwargs["top_k"] = top_k
+
+    # Default
+    tokenizer.padding_side = "left"
+
+    # Seq2seq (e.g., T5): right padding + decoder start token
+    if getattr(model.config, "is_encoder_decoder", False):
+        tokenizer.padding_side = "right"
+        if model.config.decoder_start_token_id is None:
+            model.config.decoder_start_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        bsz = inputs["input_ids"].size(0)
+        device = inputs["input_ids"].device
+        kwargs["decoder_input_ids"] = torch.full(
+            (bsz, 1),
+            model.config.decoder_start_token_id,
+            dtype=inputs["input_ids"].dtype,
+            device=device,
+        )
+
+    return kwargs
+
+
+
+def hf_token():
+    return os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
 
 def create_simple_calibration_data(model_name, tokenizer, n_samples=64, seq_length=128):
     """Create simple calibration data without hanging"""
-    # Create diverse text samples
     sample_texts = [
         "The quick brown fox jumps over the lazy dog.",
         "Machine learning models are becoming more efficient.",
@@ -26,12 +87,11 @@ def create_simple_calibration_data(model_name, tokenizer, n_samples=64, seq_leng
         "Artificial intelligence is transforming various industries.",
     ]
     
-    # Repeat and mix to create more samples
-    full_text = " ".join(sample_texts * (n_samples // len(sample_texts) + 1))
+    # Short samples to fill the batch
+    batch = (sample_texts * ((n_samples + len(sample_texts) - 1)//len(sample_texts)))[:n_samples]
     
-    # Tokenize with proper settings
     inputs = tokenizer(
-        full_text,
+        batch,
         return_tensors="pt",
         max_length=seq_length,
         truncation=True,
@@ -42,51 +102,122 @@ def create_simple_calibration_data(model_name, tokenizer, n_samples=64, seq_leng
     return inputs["input_ids"]
 
 def calculate_actual_model_size(model):
-    """Calculate actual memory usage with mixed precision"""
+    """Calculate actual memory usage - FIXED to avoid double counting"""
+    from gpu_poor.quantization import (
+        QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6, QuantizedConv1D
+    )
+    try:
+        from gpu_poor.quantization import QuantizedEmbeddingINT8, QuantizedLMHeadINT8
+    except ImportError:
+        QuantizedEmbeddingINT8 = None
+        QuantizedLMHeadINT8 = None
+    
     total_bytes = 0
-    layer_stats = {'int4': 0, 'int6': 0, 'int8': 0, 'fp32': 0}
+    layer_stats = {'int4': 0, 'int6': 0, 'int8': 0, 'int8_emb': 0, 'fp32': 0}
+    
+    # Track what we've counted to avoid double-counting
+    counted_modules = set()
     
     for name, module in model.named_modules():
-        # Skip wrapper modules
+        # Skip if already counted
+        if id(module) in counted_modules:
+            continue
+        
+        # Handle QuantizedConv1D wrapper
         if isinstance(module, QuantizedConv1D):
-            # Count the underlying quantized linear
+            # Count the underlying linear, mark wrapper as counted
+            counted_modules.add(id(module))
             module = module.quantized_linear
+            # Don't add to counted yet - let it be counted below
         
         if isinstance(module, QuantizedLinearINT4):
-            # INT4: packed storage (0.5 bytes per weight)
-            total_bytes += module.weight_packed.numel()
+            total_bytes += module.weight_packed.numel() * module.weight_packed.element_size()
+            total_bytes += module.scale.numel() * module.scale.element_size()
+            total_bytes += module.zero_point.numel() * module.zero_point.element_size()
             if module.bias is not None:
-                total_bytes += module.bias.numel() * 4
+                total_bytes += module.bias.numel() * module.bias.element_size()
             layer_stats['int4'] += 1
+            counted_modules.add(id(module))
             
         elif isinstance(module, QuantizedLinearINT6):
-            # INT6: stored as INT8 (1 byte per weight)
-            total_bytes += module.weight_int8.numel()
+            total_bytes += module.weight_int8.numel() * module.weight_int8.element_size()
+            total_bytes += module.scale.numel() * module.scale.element_size()
             if module.bias is not None:
-                total_bytes += module.bias.numel() * 4
+                total_bytes += module.bias.numel() * module.bias.element_size()
             layer_stats['int6'] += 1
+            counted_modules.add(id(module))
             
         elif isinstance(module, QuantizedLinear):
-            # INT8: 1 byte per parameter
-            total_bytes += module.weight_quantized.numel()
+            total_bytes += module.weight_quantized.numel() * module.weight_quantized.element_size()
+            total_bytes += module.weight_scale.numel() * module.weight_scale.element_size()
+            total_bytes += module.weight_zero_point.numel() * module.weight_zero_point.element_size()
             if module.bias is not None:
-                total_bytes += module.bias.numel() * 4
+                total_bytes += module.bias.numel() * module.bias.element_size()
             layer_stats['int8'] += 1
+            counted_modules.add(id(module))
+        
+        elif QuantizedEmbeddingINT8 is not None and isinstance(module, QuantizedEmbeddingINT8):
+            total_bytes += module.weight_int8.numel() * 1  # int8
+            total_bytes += module.scale.numel() * 4  # float32
+            layer_stats['int8_emb'] += 1
+            counted_modules.add(id(module))
+        
+        elif QuantizedLMHeadINT8 is not None and isinstance(module, QuantizedLMHeadINT8):
+            if module.weight_shared:
+                # Only count bias
+                if module.bias is not None:
+                    total_bytes += module.bias.numel() * module.bias.element_size()
+            else:
+                # Count weights + scales + bias
+                total_bytes += module.weight_int8_T.numel() * 1
+                total_bytes += module.scale.numel() * 4
+                if module.bias is not None:
+                    total_bytes += module.bias.numel() * module.bias.element_size()
+            counted_modules.add(id(module))
             
         elif hasattr(module, 'weight') and module.weight is not None:
-            # Only count non-quantized layers
-            module_type = type(module).__name__
-            if 'Quantized' not in module_type and 'Conv1D' != module_type:
-                # Skip embeddings and layer norms as they stay FP32
-                if any(skip in name.lower() for skip in ['embed', 'ln', 'norm']):
-                    total_bytes += module.weight.numel() * module.weight.element_size()
-                    if hasattr(module, 'bias') and module.bias is not None:
-                        total_bytes += module.bias.numel() * module.bias.element_size()
-                else:
-                    # This shouldn't happen if quantization worked
+            # Only count substantial FP32 layers (skip tiny ones)
+            if module.weight.numel() > 100:  # Skip very small layers
+                total_bytes += module.weight.numel() * module.weight.element_size()
+                if hasattr(module, 'bias') and module.bias is not None:
+                    total_bytes += module.bias.numel() * module.bias.element_size()
+                # Only count as FP32 if it's a significant layer
+                if module.weight.numel() > 10000:
                     layer_stats['fp32'] += 1
+                counted_modules.add(id(module))
     
     return total_bytes / (1024 * 1024), layer_stats
+
+# def prepare_for_generation(model):
+#     """Pre-dequantize all weights once before generation for maximum speed"""
+#     from gpu_poor.quantization import (
+#         QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6, QuantizedConv1D
+#     )
+    
+#     print("[Speed Optimization] Pre-dequantizing weights for generation...")
+#     count = 0
+    
+#     for name, module in model.named_modules():
+#         # Skip wrapper
+#         actual_module = module.quantized_linear if isinstance(module, QuantizedConv1D) else module
+        
+#         # Pre-cache INT4/INT6 weights
+#         if isinstance(actual_module, QuantizedLinearINT4):
+#             if not hasattr(actual_module, '_cached_weight') or actual_module._cached_weight is None:
+#                 # Trigger dequantization once
+#                 dummy = torch.zeros(1, actual_module.in_features)
+#                 _ = actual_module(dummy)
+#                 count += 1
+        
+#         elif isinstance(actual_module, QuantizedLinearINT6):
+#             if not hasattr(actual_module, '_cached_weight') or actual_module._cached_weight is None:
+#                 # Trigger dequantization once
+#                 dummy = torch.zeros(1, actual_module.in_features)
+#                 _ = actual_module(dummy)
+#                 count += 1
+    
+#     print(f"[Speed Optimization] Cached {count} layers")
+#     return model
 
 def demo_production_ready(model_name="gpt2"):
     print(f"\n{'='*70}")
@@ -94,21 +225,26 @@ def demo_production_ready(model_name="gpt2"):
     print(f" INT4/INT6/INT8 Adaptive Quantization")
     print(f"{'='*70}")
     
-    # Load model and tokenizer
+    # Loading model and tokenizer
     print(f"\n[1/5] Loading {model_name}...")
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_name, token=hf_token())
+    except ValueError:
+        from transformers import AutoModelForSeq2SeqLM
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, token=hf_token())
+        print("Note: Loaded as Seq2Seq model")
+
+    baseline_model = deepcopy(model) #untouched FP32 model for comparison        
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token())
     
-    # Fix tokenizer settings
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'left'  # Important for generation
     
-    # Calculate original size
     original_size = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
     print(f"Original size: {original_size:.1f} MB")
     
-    # Create calibration data
+    #  cal data
     print("\n[2/5] Creating calibration data...")
     print("="*60)
     print("CALIBRATION DATA PREPARATION")
@@ -122,13 +258,13 @@ def demo_production_ready(model_name="gpt2"):
     )
     print(f"[Calibration] Created calibration tensor: {calibration_data.shape}")
     
-    # Apply mixed-precision quantization
+    # mixed-precision quantization
     print("\n[3/5] Applying mixed-precision quantization...")
     print("="*60)
     print("MIXED-PRECISION QUANTIZATION")
     print("="*60)
     
-    # Use the hybrid quantizer with mixed precision
+    # hybrid quantizer with mixed precision
     quantized_model = make_it_work_hybrid(
         model,
         sample_inputs=calibration_data,
@@ -138,18 +274,76 @@ def demo_production_ready(model_name="gpt2"):
     
     print("[Success] Model quantized with mixed precision!")
     
-    # Calculate actual compressed size
+    # Calculating actual compressed size
     compressed_size, layer_stats = calculate_actual_model_size(quantized_model)
     
-    # Optimize for inference
+# Optimizing for inference
     print("\n[4/5] Optimizing for inference speed...")
     optimized_model = OptimizedModel(quantized_model)
-    optimized_model.optimize()
+    optimized_model.optimize()  # This does ALL the pre-caching now
     
-    # Benchmark
+    # === GPU-POOR DIAGNOSTICS START ===
+    if os.getenv("GPU_POOR_DIAG", "0") == "1":
+        print("\n" + "="*60)
+        print("GPU-POOR DIAGNOSTICS")
+        print("="*60)
+        
+        from gpu_poor.quantization import (
+            QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6, QuantizedConv1D
+        )
+        try:
+            from gpu_poor.quantization import QuantizedEmbeddingINT8, QuantizedLMHeadINT8
+        except ImportError:
+            QuantizedEmbeddingINT8 = None
+            QuantizedLMHeadINT8 = None
+        
+        print("\n[1] Quantization Coverage:")
+        quant_linear = 0
+        quant_emb = 0
+        quant_lmhead_shared = 0
+        
+        for n, m in optimized_model.named_modules():
+            if isinstance(m, (QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6)):
+                quant_linear += 1
+            elif isinstance(m, QuantizedConv1D):
+                quant_linear += 1
+            elif QuantizedEmbeddingINT8 and isinstance(m, QuantizedEmbeddingINT8):
+                quant_emb += 1
+            elif QuantizedLMHeadINT8 and isinstance(m, QuantizedLMHeadINT8):
+                if m.weight_shared:
+                    quant_lmhead_shared += 1
+        
+        print(f"  Quantized Linear/INT4/INT6: {quant_linear}")
+        print(f"  Quantized Embeddings: {quant_emb}")
+        print(f"  Quantized LM Heads (shared): {quant_lmhead_shared}")
+        
+        print("\n[2] Embedding Tables:")
+        for n, m in optimized_model.named_modules():
+            if isinstance(m, nn.Embedding):
+                size_mb = m.weight.numel() * m.weight.element_size() / (1024**2)
+                print(f"  [FP32-EMB] {n}: {size_mb:.1f} MB")
+            elif QuantizedEmbeddingINT8 and isinstance(m, QuantizedEmbeddingINT8):
+                int8_mb = m.weight_int8.numel() * 1 / (1024**2)
+                scale_mb = m.scale.numel() * 4 / (1024**2)
+                print(f"  [INT8-EMB] {n}: {int8_mb + scale_mb:.1f} MB")
+        
+        print("\n[3] LM Head:")
+        for n, m in optimized_model.named_modules():
+            if 'lm_head' in n.lower():
+                if QuantizedLMHeadINT8 and isinstance(m, QuantizedLMHeadINT8):
+                    if m.weight_shared:
+                        print(f"  [INT8-LMHEAD-SHARED] {n}: tied to embedding")
+                    else:
+                        print(f"  [INT8-LMHEAD-STANDALONE] {n}")
+                elif isinstance(m, nn.Linear):
+                    size_mb = m.weight.numel() * 4 / (1024**2)
+                    print(f"  [FP32-LMHEAD] {n}: {size_mb:.1f} MB")
+        
+        print("="*60)
+    # === GPU-POOR DIAGNOSTICS END ===
+
     print("\n[5/5] Benchmarking...")
     
-    # Test generation
     test_prompt = "The future of technology"
     inputs = tokenizer(
         test_prompt, 
@@ -161,44 +355,68 @@ def demo_production_ready(model_name="gpt2"):
     # Warmup
     print("Warming up...")
     with torch.no_grad():
+        # Building per-model kwargs (handles T5 vs GPT/OPT/Llama)
+        base_kwargs = build_gen_kwargs(baseline_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
+        opt_kwargs  = build_gen_kwargs(optimized_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
+
+        _ = baseline_model.generate(
+            inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            **base_kwargs
+        )
         _ = optimized_model.generate(
             inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_length=50,
-            do_sample=True,
-            temperature=0.8,
-            pad_token_id=tokenizer.pad_token_id
+            attention_mask=inputs.get("attention_mask"),
+            **opt_kwargs
+        )
+
+    # Warmup
+    print("Warming up...")
+    with torch.no_grad():
+
+        # Building per-model kwargs (handles T5 vs GPT/OPT/Llama)*I hope*
+        base_kwargs = build_gen_kwargs(baseline_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
+        opt_kwargs  = build_gen_kwargs(optimized_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
+
+        _ = baseline_model.generate(
+            inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            **base_kwargs
+        )
+        _ = optimized_model.generate(
+            inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            **opt_kwargs
         )
     
     # Time original
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = time.perf_counter()
     with torch.no_grad():
-        output_original = model.generate(
+        output_original = baseline_model.generate(
             inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_length=50,
-            do_sample=True,
-            temperature=0.8,
-            pad_token_id=tokenizer.pad_token_id
+            attention_mask=inputs.get("attention_mask"),
+            **base_kwargs
         )
     original_time = time.perf_counter() - start
     
     # Time optimized
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = time.perf_counter()
     with torch.no_grad():
         output_optimized = optimized_model.generate(
             inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_length=50,
-            do_sample=True,
-            temperature=0.8,
-            pad_token_id=tokenizer.pad_token_id
+            attention_mask=inputs.get("attention_mask"),
+            **opt_kwargs
         )
     optimized_time = time.perf_counter() - start
     
-    # Show results
+    latency_ratio_opt_over_fp32 = (optimized_time / original_time) if original_time > 0 else float("inf")
+    speedup_x = (1.0 / latency_ratio_opt_over_fp32) if latency_ratio_opt_over_fp32 > 0 else 0.0
+
+    # Results! Finally.
     print(f"\n{'='*70}")
     print("RESULTS")
     print(f"{'='*70}")
@@ -217,8 +435,10 @@ def demo_production_ready(model_name="gpt2"):
     print(f"\nSpeed:")
     print(f"  Original: {original_time:.2f}s")
     print(f"  Optimized: {optimized_time:.2f}s")
-    speedup = original_time / optimized_time if optimized_time > 0 else 1.0
-    print(f"  Speedup: {speedup:.1f}x")
+    latency_ratio_opt_over_fp32 = (optimized_time / original_time) if original_time > 0 else float("inf")  # <1 is faster
+    speedup_x = (1.0 / latency_ratio_opt_over_fp32) if latency_ratio_opt_over_fp32 > 0 else 0.0           # >1 is faster
+    print(f"  Speedup: {speedup_x:.2f}x  (latency opt/fp32 = {latency_ratio_opt_over_fp32:.3f})")
+
     
     print(f"\nGeneration Quality:")
     original_text = tokenizer.decode(output_original[0], skip_special_tokens=True)
@@ -227,7 +447,7 @@ def demo_production_ready(model_name="gpt2"):
     print(f"  Original: '{original_text}'")
     print(f"  Optimized: '{optimized_text}'")
     
-    # Check for repetitions
+    # Checking for repetitions
     words = optimized_text.split()
     repetitions = 0
     for i in range(len(words) - 2):
@@ -239,7 +459,7 @@ def demo_production_ready(model_name="gpt2"):
     else:
         print(f"\n  [WARNING] Quality: {repetitions} repetitive patterns detected")
     
-    # Performance summary
+    # Performance summary!
     print(f"\n{'='*70}")
     print("PERFORMANCE SUMMARY")
     print(f"{'='*70}")
@@ -258,11 +478,15 @@ def demo_production_ready(model_name="gpt2"):
     return {
         'original_size': original_size,
         'compressed_size': compressed_size,
-        'compression_ratio': (1 - compressed_size/original_size)*100,
-        'speedup': speedup,
+        'compression_ratio': (1 - compressed_size / original_size) * 100,
+        'latency_seconds_fp32': original_time,
+        'latency_seconds_quant': optimized_time,
+        'latency_ratio_opt_over_fp32': latency_ratio_opt_over_fp32,  # lower is better
+        'speedup_x': speedup_x,                                      # higher is better
         'layer_stats': layer_stats,
         'has_repetitions': repetitions > 0
     }
+
 
 if __name__ == "__main__":
     import sys
@@ -279,11 +503,11 @@ if __name__ == "__main__":
     import os
 
     os.makedirs("results", exist_ok=True)
-     # Save individual result
+     # individual result
     with open(f"results/{model_name.replace('/', '_')}.json", "w") as f:
         json.dump(results, f, indent=2)
     
-    # Append to master results file
+    # master results file
     results_file = "results/all_results.json"
     if os.path.exists(results_file):
         with open(results_file, "r") as f:
@@ -294,17 +518,15 @@ if __name__ == "__main__":
     all_results.append({
         "model": model_name,
         "compression": results['compression_ratio'],
-        "speedup": results['speedup'],
+        "speedup": results.get('speedup_x'),  # use the >1× speedup
+        "latency_ratio": results.get('latency_ratio_opt_over_fp32'),
         "original_mb": results['original_size'],
         "compressed_mb": results['compressed_size'],
         "quality": "good" if not results['has_repetitions'] else "repetitions"
     })
+
     
     with open(results_file, "w") as f:
         json.dump(all_results, f, indent=2)
     
     print(f"\nResults saved to results/{model_name.replace('/', '_')}.json")
-    
-    # You can test with other models:
-    # demo_production_ready("microsoft/phi-2")
-    # demo_production_ready("facebook/opt-125m")

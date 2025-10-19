@@ -1,19 +1,81 @@
-# Python 
-__pycache__/ 
-*.py[cod] 
-venv/ 
-.venv/ 
-*.egg-info/ 
-dist/ 
-build/ 
-results/ 
-*.json 
-*.log 
-*.bin 
-*.safetensors 
-*.pt 
-*.pth 
-.vscode/ 
-.idea/ 
-.DS_Store 
-.pytest_cache/ 
+# -----------------------------
+# Python build / artifacts
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.dist-info/
+*.egg
+*.egg-info/
+build/
+dist/
+pip-wheel-metadata/
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# -----------------------------
+# Caches & tooling
+# -----------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.nox/
+.tox/
+.cache/
+
+# -----------------------------
+# Logs & results (directories)
+# -----------------------------
+logs/
+results/
+
+*.log
+
+# -----------------------------
+# Data / model artifacts
+# -----------------------------
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.pkl
+*.npy
+*.npz
+*.tar
+*.tar.gz
+*.zip
+*.gz
+*.xz
+
+# Hugging Face / datasets caches 
+hf_cache/
+cache/
+data/
+datasets/
+
+# -----------------------------
+# Env / secrets
+# -----------------------------
+.env
+.env.*
+*.env
+*.secret
+.git-credentials
+
+# -----------------------------
+# Editors / OS
+# -----------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+

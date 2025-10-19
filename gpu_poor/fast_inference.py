@@ -97,60 +97,98 @@ class FastQuantizedLinear(nn.Module):
 
 
 class OptimizedModel:
+    """
+    Wrapper that pre-dequantizes all INT8 weights for maximum speed.
+    Trades memory for speed - dequantizes once, not 50× during generation.
+    """
     def __init__(self, model):
-        # Use object.__setattr__ to avoid triggering __setattr__ if defined
         object.__setattr__(self, '_model', model)
         object.__setattr__(self, '_optimized', False)
-        object.__setattr__(self, '_cache', {})
     
     def optimize(self):
-        """Apply all optimizations"""
+        """Pre-dequantize all quantized weights for fast generation"""
         if self._optimized:
             return
         
         print("[Optimization] Starting inference optimizations...")
-        self.fuse_operations()
-        self.enable_fast_path()
-        self._optimized = True
-        print("[Optimization] Complete!")
-    
-    def fuse_operations(self):
-        """Fuse consecutive operations where possible"""
-        # Access the actual model through _model
-        for name, module in self._model.named_modules():
-            if hasattr(module, 'fuse'):
-                module.fuse()
-    
-    def enable_fast_path(self):
-        """Enable fast inference paths"""
-        if hasattr(self._model, 'eval'):
-            self._model.eval()
         
-        # Enable inference mode optimizations
-        for name, module in self._model.named_modules():
-            if hasattr(module, 'inference_mode'):
-                module.inference_mode = True
+        # Import all quantized types
+        from .quantization import (
+            QuantizedLinear, 
+            QuantizedLinearINT4, 
+            QuantizedLinearINT6, 
+            QuantizedConv1D
+        )
+        try:
+            from .quantization import QuantizedLinearINT3
+        except:
+            QuantizedLinearINT3 = None
+        
+        cached_count = 0
+        
+        # Pre-dequantize all weights
+        with torch.no_grad():
+            for name, module in self._model.named_modules():
+                # Unwrap Conv1D
+                actual = module.quantized_linear if isinstance(module, QuantizedConv1D) else module
+                
+                # INT8: Pre-dequantize and cache
+                if isinstance(actual, QuantizedLinear):
+                    if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
+                        # Manually dequantize
+                        weight_float = (actual.weight_quantized.float() - actual.weight_zero_point) * actual.weight_scale
+                        actual._cached_weight = weight_float.detach()
+                        actual._use_cache = True
+                        cached_count += 1
+                
+                # INT6: Pre-dequantize and cache
+                elif isinstance(actual, QuantizedLinearINT6):
+                    if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
+                        weight_float = actual.weight_int8.float() * actual.scale
+                        actual._cached_weight = weight_float.detach()
+                        actual._use_cache = True
+                        cached_count += 1
+                
+                # INT4: Pre-dequantize and cache
+                elif isinstance(actual, QuantizedLinearINT4):
+                    if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
+                        # Trigger forward once to cache
+                        dummy = torch.zeros(1, actual.in_features)
+                        _ = actual(dummy)
+                        cached_count += 1
+                
+                # INT3: Pre-dequantize and cache
+                elif QuantizedLinearINT3 and isinstance(actual, QuantizedLinearINT3):
+                    if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
+                        # Trigger forward once to cache
+                        dummy = torch.zeros(1, actual.in_features)
+                        _ = actual(dummy)
+                        cached_count += 1
+        
+        # Set to eval mode
+        self._model.eval()
+        
+        print(f"[Optimization] Pre-cached {cached_count} weight matrices")
+        print("[Optimization] Complete!")
+        
+        self._optimized = True
     
     def __getattr__(self, name):
-        """Forward all other attributes to the wrapped model"""
-        # Only called for attributes not found on OptimizedModel
+        """Forward all attributes to wrapped model"""
         return getattr(self._model, name)
     
     def __setattr__(self, name, value):
-        """Forward attribute setting to the wrapped model"""
-        if name in ['_model', '_optimized', '_cache']:
+        """Forward attribute setting to wrapped model"""
+        if name in ['_model', '_optimized']:
             object.__setattr__(self, name, value)
         else:
             setattr(self._model, name, value)
     
     def generate(self, *args, **kwargs):
-        """Optimized generate method"""
+        """Generate with optimizations"""
         if not self._optimized:
             self.optimize()
-        
-        # Forward to the model's generate method
         return self._model.generate(*args, **kwargs)
-
 
 class FusedLinearActivation(nn.Module):
     """Fused Linear + Activation for speed"""

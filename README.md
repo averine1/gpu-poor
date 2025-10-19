@@ -4,7 +4,7 @@
 
 ## 🎯 What is GPU-Poor?
 
-GPU-Poor compresses language models by **50-79%** with zero quality loss using adaptive mixed-precision quantization (INT4/INT6/INT8).
+gpu-poor: Run bigger LLMs on CPUs — 50–79% less RAM with preserved quality and ~1.4–2.2× faster generation on tested models, using pure PyTorch (no custom kernels). Proven on GPT-2, GPT-2-Medium, OPT-125M, and TinyLlama-1.1B; seq2seq (T5) supported with a one-line decoder start token setup.
 
 ## 📊 Proven Results
 
