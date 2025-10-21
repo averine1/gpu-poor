@@ -15,6 +15,10 @@ import warnings
 warnings.filterwarnings('ignore')
 import torch, os 
 torch.set_num_threads(os.cpu_count() or 1)  # all CPU cores
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
 
 def build_gen_kwargs(
     model,
@@ -188,36 +192,132 @@ def calculate_actual_model_size(model):
     
     return total_bytes / (1024 * 1024), layer_stats
 
-# def prepare_for_generation(model):
-#     """Pre-dequantize all weights once before generation for maximum speed"""
-#     from gpu_poor.quantization import (
-#         QuantizedLinear, QuantizedLinearINT4, QuantizedLinearINT6, QuantizedConv1D
-#     )
+def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, model_name):
+    """
+    Comprehensive quality measurement: Perplexity + BLEU + Generation samples
+    """
+    import math
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
     
-#     print("[Speed Optimization] Pre-dequantizing weights for generation...")
-#     count = 0
+    print("\n[Quality] Running comprehensive evaluation...")
     
-#     for name, module in model.named_modules():
-#         # Skip wrapper
-#         actual_module = module.quantized_linear if isinstance(module, QuantizedConv1D) else module
+    # Test prompts covering different domains
+    test_prompts = [
+        "The quick brown fox",
+        "Machine learning is",
+        "In the year 2025,",
+        "The capital of France",
+        "Scientists have discovered",
+        "The future of technology",
+        "Climate change will",
+        "Artificial intelligence can",
+    ]
+    
+    results = {
+        'perplexity_baseline': [],
+        'perplexity_quantized': [],
+        'bleu_scores': [],
+        'generation_samples': []
+    }
+    
+    smoothing = SmoothingFunction()
+    
+    for prompt in test_prompts:
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True)
         
-#         # Pre-cache INT4/INT6 weights
-#         if isinstance(actual_module, QuantizedLinearINT4):
-#             if not hasattr(actual_module, '_cached_weight') or actual_module._cached_weight is None:
-#                 # Trigger dequantization once
-#                 dummy = torch.zeros(1, actual_module.in_features)
-#                 _ = actual_module(dummy)
-#                 count += 1
+        # Measure perplexity
+        with torch.no_grad():
+            # Baseline
+            try:
+                outputs_base = baseline_model(**inputs, labels=inputs["input_ids"])
+                ppl_base = math.exp(outputs_base.loss.item())
+                results['perplexity_baseline'].append(ppl_base)
+            except:
+                ppl_base = None
+            
+            # Quantized
+            try:
+                outputs_quant = optimized_model(**inputs, labels=inputs["input_ids"])
+                if hasattr(outputs_quant, 'loss') and outputs_quant.loss is not None:
+                    ppl_quant = math.exp(outputs_quant.loss.item())
+                    results['perplexity_quantized'].append(ppl_quant)
+                else:
+                    ppl_quant = None
+            except Exception as e:
+                print(f"    [Warning] Perplexity calculation failed for quantized model: {e}")
+                ppl_quant = None
         
-#         elif isinstance(actual_module, QuantizedLinearINT6):
-#             if not hasattr(actual_module, '_cached_weight') or actual_module._cached_weight is None:
-#                 # Trigger dequantization once
-#                 dummy = torch.zeros(1, actual_module.in_features)
-#                 _ = actual_module(dummy)
-#                 count += 1
+        # Generate text for BLEU comparison
+        with torch.no_grad():
+            gen_base = baseline_model.generate(
+                inputs["input_ids"],
+                max_new_tokens=30,
+                do_sample=False,  # Deterministic for comparison
+                pad_token_id=tokenizer.pad_token_id
+            )
+            
+            gen_quant = optimized_model.generate(
+                inputs["input_ids"],
+                max_new_tokens=30,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id
+            )
+        
+        # Decode
+        text_base = tokenizer.decode(gen_base[0], skip_special_tokens=True)
+        text_quant = tokenizer.decode(gen_quant[0], skip_special_tokens=True)
+        
+        # Calculate BLEU (comparing quantized to baseline as reference)
+        reference = [text_base.split()]
+        hypothesis = text_quant.split()
+        
+        bleu = sentence_bleu(reference, hypothesis, 
+                            smoothing_function=smoothing.method1)
+        results['bleu_scores'].append(bleu)
+        
+        # Store sample
+        results['generation_samples'].append({
+            'prompt': prompt,
+            'baseline': text_base,
+            'quantized': text_quant,
+            'bleu': bleu
+        })
     
-#     print(f"[Speed Optimization] Cached {count} layers")
-#     return model
+    # Calculate averages
+    avg_ppl_base = sum(results['perplexity_baseline']) / len(results['perplexity_baseline']) if results['perplexity_baseline'] else None
+    avg_ppl_quant = sum(results['perplexity_quantized']) / len(results['perplexity_quantized']) if results['perplexity_quantized'] else None
+    avg_bleu = sum(results['bleu_scores']) / len(results['bleu_scores'])
+    
+    ppl_degradation = ((avg_ppl_quant - avg_ppl_base) / avg_ppl_base * 100) if (avg_ppl_base and avg_ppl_quant) else None
+    
+    print(f"\nQuality Metrics:")
+    if avg_ppl_base and avg_ppl_quant:
+        print(f"  Perplexity (baseline): {avg_ppl_base:.2f}")
+        print(f"  Perplexity (quantized): {avg_ppl_quant:.2f}")
+        print(f"  Perplexity change: {ppl_degradation:+.1f}%")
+    print(f"  BLEU score: {avg_bleu:.3f} (1.0 = identical to baseline)")
+    
+    # Quality assessment
+    if avg_bleu > 0.95:
+        quality = "Excellent"
+    elif avg_bleu > 0.90:
+        quality = "Very Good"
+    elif avg_bleu > 0.85:
+        quality = "Good"
+    else:
+        quality = "Acceptable"
+    
+    print(f"  Quality: {quality}")
+    
+    return {
+        'perplexity_baseline': avg_ppl_base,
+        'perplexity_quantized': avg_ppl_quant,
+        'perplexity_degradation_pct': ppl_degradation,
+        'bleu_score': avg_bleu,
+        'quality_rating': quality,
+        'samples': results['generation_samples'][:3]  # Keep first 3 for reporting
+    }
+
 
 def demo_production_ready(model_name="gpt2"):
     print(f"\n{'='*70}")
@@ -342,8 +442,16 @@ def demo_production_ready(model_name="gpt2"):
         print("="*60)
     # === GPU-POOR DIAGNOSTICS END ===
 
-    print("\n[5/5] Benchmarking...")
+    print("\n[5/5] Benchmarking and Quality Evaluation...")
     
+    # Quality evaluation FIRST (use unwrapped model for perplexity)
+    quality_results = measure_quality_comprehensive(
+        baseline_model, 
+        quantized_model,  # ← Changed from optimized_model
+        tokenizer,
+        model_name
+    )
+        
     test_prompt = "The future of technology"
     inputs = tokenizer(
         test_prompt, 
@@ -446,7 +554,13 @@ def demo_production_ready(model_name="gpt2"):
     
     print(f"  Original: '{original_text}'")
     print(f"  Optimized: '{optimized_text}'")
-    
+    print(f"\nQuality Metrics:")
+    print(f"  BLEU score: {quality_results['bleu_score']:.3f}")
+
+    if quality_results['perplexity_degradation_pct']:
+        print(f"  Perplexity change: {quality_results['perplexity_degradation_pct']:+.1f}%")
+    print(f"  Rating: {quality_results['quality_rating']}")
+
     # Checking for repetitions
     words = optimized_text.split()
     repetitions = 0
@@ -484,7 +598,13 @@ def demo_production_ready(model_name="gpt2"):
         'latency_ratio_opt_over_fp32': latency_ratio_opt_over_fp32,  # lower is better
         'speedup_x': speedup_x,                                      # higher is better
         'layer_stats': layer_stats,
-        'has_repetitions': repetitions > 0
+        'has_repetitions': repetitions > 0,
+        'perplexity_baseline': quality_results['perplexity_baseline'],
+        'perplexity_quantized': quality_results['perplexity_quantized'],
+        'perplexity_degradation_pct': quality_results['perplexity_degradation_pct'],
+        'bleu_score': quality_results['bleu_score'],
+        'quality_rating': quality_results['quality_rating'],
+        'quality_samples': quality_results['samples']
     }
 
 
