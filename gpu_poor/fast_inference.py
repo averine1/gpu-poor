@@ -21,10 +21,10 @@ class FastQuantizedLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         
-        # Store INT8 weights
+        #INT8 weights
         self.register_buffer('weight_int8', torch.zeros(out_features, in_features, dtype=torch.int8))
         
-        # Use per-row scales for better cache locality
+        #per-row scales for better cache locality
         self.register_buffer('scale', torch.ones(out_features, 1))
         self.register_buffer('zero_point', torch.zeros(out_features, 1))
         
@@ -33,33 +33,32 @@ class FastQuantizedLinear(nn.Module):
         else:
             self.register_parameter('bias', None)
         
-        # Pre-allocate workspace for dequantization
+        #workspace for dequantization allocatioin
         self.register_buffer('workspace', torch.empty(out_features, in_features))
     
     @torch.jit.export
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Optimized forward pass with fused operations"""
-        # Fused dequantization and matmul
-        # This is 2x faster than separate operations
+        #Fused dequantization and matmul-this is 2x faster than separate operations
         
-        # Option 1: For CPU - use optimized einsum
+        #CPU - use optimized einsum
         if input.device.type == 'cpu':
             # Dequantize on-the-fly during computation
             weight_float = self.weight_int8.float()
             weight_float = (weight_float - self.zero_point) * self.scale
             
-            # Use einsum for better performance
-            if input.dim() == 3:  # (batch, seq, features)
+            #einsum for better performance
+            if input.dim() == 3:
                 output = torch.einsum('bsi,oi->bso', input, weight_float)
-            else:  # (batch, features)
+            else:  #batch, features
                 output = torch.einsum('bi,oi->bo', input, weight_float)
         else:
-            # For GPU, different optimization strategy
+            #For GPU, different optimization strategy
             weight_float = self.weight_int8.to(input.dtype)
             weight_float = weight_float.sub_(self.zero_point).mul_(self.scale)
             output = F.linear(input, weight_float, None)
         
-        # Add bias if present
+        #Add bias
         if self.bias is not None:
             output = output + self.bias
         
@@ -73,21 +72,20 @@ class FastQuantizedLinear(nn.Module):
         
         quantized = FastQuantizedLinear(in_features, out_features, module.bias is not None)
         
-        # Optimized per-row quantization
-        # This is faster and more accurate than per-tensor
+        #optimized per-row quantization faster/more accurate than per-tensor
         for i in range(out_features):
             row = weight[i]
             min_val = row.min().item()
             max_val = row.max().item()
             
-            # Symmetric quantization for speed
+            #symmetric quantization = speed
             abs_max = max(abs(min_val), abs(max_val))
             scale = abs_max / 127.0 if abs_max > 0 else 1.0
             
             quantized.scale[i] = scale
-            quantized.zero_point[i] = 0  # Symmetric
+            quantized.zero_point[i] = 0  
             
-            # Quantize row
+            #quantize row
             quantized.weight_int8[i] = torch.round(row / scale).clamp(-128, 127).to(torch.int8)
         
         if module.bias is not None:
@@ -112,7 +110,7 @@ class OptimizedModel:
         
         print("[Optimization] Starting inference optimizations...")
         
-        # Import all quantized types
+        
         from .quantization import (
             QuantizedLinear, 
             QuantizedLinearINT4, 
@@ -126,13 +124,13 @@ class OptimizedModel:
         
         cached_count = 0
         
-        # Pre-dequantize all weights
+        #pre-dequantize all weights
         with torch.no_grad():
             for name, module in self._model.named_modules():
-                # Unwrap Conv1D
+                #unwrap Conv1D
                 actual = module.quantized_linear if isinstance(module, QuantizedConv1D) else module
                 
-                # INT8: Pre-dequantize and cache
+                #INT8 pre-dequantize and cache
                 if isinstance(actual, QuantizedLinear):
                     if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
                         # Manually dequantize
@@ -141,7 +139,7 @@ class OptimizedModel:
                         actual._use_cache = True
                         cached_count += 1
                 
-                # INT6: Pre-dequantize and cache
+                #INT6 pre-dequantize and cache
                 elif isinstance(actual, QuantizedLinearINT6):
                     if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
                         weight_float = actual.weight_int8.float() * actual.scale
@@ -149,7 +147,7 @@ class OptimizedModel:
                         actual._use_cache = True
                         cached_count += 1
                 
-                # INT4: Pre-dequantize and cache
+                #INT4 pre-dequantize and cache
                 elif isinstance(actual, QuantizedLinearINT4):
                     if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
                         # Trigger forward once to cache
@@ -157,15 +155,15 @@ class OptimizedModel:
                         _ = actual(dummy)
                         cached_count += 1
                 
-                # INT3: Pre-dequantize and cache
+                #INT3 pre-dequantize and cache
                 elif QuantizedLinearINT3 and isinstance(actual, QuantizedLinearINT3):
                     if not hasattr(actual, '_cached_weight') or actual._cached_weight is None:
-                        # Trigger forward once to cache
+                        #trigger forward once to cache
                         dummy = torch.zeros(1, actual.in_features)
                         _ = actual(dummy)
                         cached_count += 1
         
-        # Set to eval mode
+        #setting to eval mode
         self._model.eval()
         
         print(f"[Optimization] Pre-cached {cached_count} weight matrices")
@@ -200,10 +198,10 @@ class FusedLinearActivation(nn.Module):
     
     @torch.jit.export
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Fused operation is faster than separate calls
+        #fused operation is faster than separate calls!
         out = self.linear(x)
         
-        # Inplace activation for memory efficiency
+        #inplace activation = memory efficiency
         if isinstance(self.activation, nn.ReLU):
             return F.relu(out, inplace=True)
         elif isinstance(self.activation, nn.GELU):
@@ -216,16 +214,16 @@ def benchmark_speed_improvements():
     """Benchmark the speed improvements"""
     import time
     
-    # Create test layer
+    #test layer
     in_features, out_features = 768, 3072
     batch_size, seq_len = 8, 128
     
-    # Original quantized layer
+    #org quantized layer
     from .quantization import QuantizedLinear
     original = nn.Linear(in_features, out_features)
     old_quantized = QuantizedLinear.from_float(original)
     
-    # Fast quantized layer
+    #fasst quantized layer
     fast_quantized = FastQuantizedLinear.from_float(original)
     
     # Test input
@@ -236,7 +234,7 @@ def benchmark_speed_improvements():
         _ = old_quantized(x)
         _ = fast_quantized(x)
     
-    # Benchmark old
+    #old benchmark 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     start = time.perf_counter()
     for _ in range(100):
@@ -244,7 +242,7 @@ def benchmark_speed_improvements():
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     old_time = time.perf_counter() - start
     
-    # Benchmark new
+    #new benchmark 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     start = time.perf_counter()
     for _ in range(100):

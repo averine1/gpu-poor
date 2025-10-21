@@ -19,7 +19,7 @@ class QuantizedLinear(nn.Module):
             dtype = torch.int8
             self.qmin, self.qmax = -128, 127
         elif bits == 4:
-            dtype = torch.int8  # Store 2x4-bit values in one int8
+            dtype = torch.int8  
             self.qmin, self.qmax = -8, 7
         else:
             raise ValueError(f"Unsupported bit width: {bits}")
@@ -28,7 +28,7 @@ class QuantizedLinear(nn.Module):
         self.register_buffer('weight_scale', torch.ones(out_features, 1))
         self.register_buffer('weight_zero_point', torch.zeros(out_features, 1))
         
-        # Add caching for speed
+        #add caching 
         self._cached_weight = None
         self._use_cache = True
 
@@ -38,14 +38,14 @@ class QuantizedLinear(nn.Module):
             self.register_parameter('bias', None)
     
     def forward(self, input):
-        # Use cached weight if available (massive speedup for generation)
+        #(massive speedup for generation)
         if self._use_cache and self._cached_weight is not None:
             return F.linear(input.float(), self._cached_weight, self.bias)
         
-        # Dequantize weights
+        #dequantize weights
         weight_float = (self.weight_quantized.float() - self.weight_zero_point) * self.weight_scale
         
-        # Cache for next time
+
         if self._use_cache:
             self._cached_weight = weight_float.detach()
         
@@ -63,14 +63,14 @@ class QuantizedLinear(nn.Module):
         quantized = QuantizedLinear(in_features, out_features, bits, 
                                    module.bias is not None)
         
-        # Per-channel quantization for better accuracy
+        #per-channel quantization for better accuracy
         if symmetric:
-            # Symmetric quantization (better for some layers)
+            #symmetric quantization (better for some layers)
             max_vals = weight_data.abs().max(dim=1, keepdim=True)[0]
             scale = max_vals / ((2 ** (bits - 1)) - 1)
             zero_point = torch.zeros_like(scale)
         else:
-            # Asymmetric quantization (generally better accuracy)
+            #asymmetric quantization (generally better accuracy)
             min_vals = weight_data.min(dim=1, keepdim=True)[0]
             max_vals = weight_data.max(dim=1, keepdim=True)[0]
             
@@ -78,10 +78,10 @@ class QuantizedLinear(nn.Module):
             qmax = (2 ** (bits - 1)) - 1
             
             scale = (max_vals - min_vals) / (qmax - qmin)
-            scale = torch.clamp(scale, min=1e-8)  # Avoid division by zero
+            scale = torch.clamp(scale, min=1e-8) 
             zero_point = qmin - min_vals / scale
         
-        # Quantize
+        #quantize
         weight_int = torch.round(weight_data / scale + zero_point)
         weight_int = torch.clamp(weight_int, qmin, qmax).to(torch.int8)
         
@@ -102,7 +102,6 @@ class QuantizedLinearINT4(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         
-        # Calculate packed size (2 4-bit values per byte)
         total_elements = out_features * in_features
         packed_size = (total_elements + 1) // 2
         
@@ -117,34 +116,33 @@ class QuantizedLinearINT4(nn.Module):
         else:
             self.register_parameter('bias', None)
         
-        # ADD THESE TWO LINES FOR CACHING
+      
         self._cached_weight = None
         self._use_cache = True
     
     @staticmethod
     def from_float(module, bits=4):
-        # KEEP YOUR EXISTING from_float METHOD UNCHANGED
+  
         """Convert float module to INT4"""
         weight_data = module.weight.data
         out_features, in_features = weight_data.shape
         
         quantized = QuantizedLinearINT4(in_features, out_features, module.bias is not None)
         
-        # [Rest of your existing from_float code stays the same]
-        # Per-channel asymmetric quantization for INT4
+      
+        # per-channel asymmetric quantization for INT4
         min_vals = weight_data.min(dim=1, keepdim=True)[0]
         max_vals = weight_data.max(dim=1, keepdim=True)[0]
         
-        # 4-bit range: 0 to 15
+        #0 to 15
         scale = (max_vals - min_vals) / 15
         scale = torch.clamp(scale, min=1e-8)
         zero_point = -min_vals / scale
         
-        # Quantize to 4-bit
+       
         weight_int4 = torch.round((weight_data - min_vals) / scale)
         weight_int4 = torch.clamp(weight_int4, 0, 15).to(torch.uint8)
         
-        # Pack two 4-bit values per byte
         weight_flat = weight_int4.flatten()
         packed = torch.zeros((weight_flat.numel() + 1) // 2, dtype=torch.uint8)
         
@@ -164,32 +162,30 @@ class QuantizedLinearINT4(nn.Module):
         return quantized
     
     def forward(self, x):
-        # Check cache first
+       
         if self._use_cache and self._cached_weight is not None:
             return F.linear(x, self._cached_weight, self.bias)
         
-        # VECTORIZED unpacking - replace the for-loop!
+        #VECTORIZED unpacking 
         device = self.weight_packed.device
         
-        # Convert to int32 for bit operations
+        #to int32 for bit operations
         packed_int = self.weight_packed.to(torch.int32)
         
-        # Extract nibbles using vectorized operations (1000x faster!)
+        #extract nibbles
         low_nibbles = (packed_int & 0x0F).to(torch.float32)
         high_nibbles = ((packed_int >> 4) & 0x0F).to(torch.float32)
         
-        # Stack and flatten
+
         unpacked = torch.stack([low_nibbles, high_nibbles], dim=1).flatten()
         
-        # Truncate to exact size
         weight_size = self.weight_shape[0] * self.weight_shape[1]
         unpacked = unpacked[:weight_size]
         
-        # Reshape and dequantize
+        #reshape and dequantize
         weight = unpacked.reshape(self.weight_shape)
         weight = weight * self.scale - self.zero_point * self.scale
-        
-        # Cache the result
+
         if self._use_cache:
             self._cached_weight = weight
         
@@ -204,7 +200,7 @@ class QuantizedLinearINT6(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         
-        # Store in int8 but only use 6-bit range (-32 to 31)
+        #in int8 but only use 6-bit range (-32 to 31)
         self.register_buffer('weight_int8', torch.zeros(out_features, in_features, dtype=torch.int8))
         self.register_buffer('scale', torch.ones(out_features, 1))
         
@@ -213,25 +209,25 @@ class QuantizedLinearINT6(nn.Module):
         else:
             self.register_parameter('bias', None)
         
-        # ADD THESE TWO LINES FOR CACHING
+
         self._cached_weight = None
         self._use_cache = True
     
     @staticmethod
     def from_float(module, bits=6):
-        # KEEP YOUR EXISTING from_float METHOD UNCHANGED
+
         """Convert float module to INT6"""
         weight_data = module.weight.data
         out_features, in_features = weight_data.shape
         
         quantized = QuantizedLinearINT6(in_features, out_features, module.bias is not None)
         
-        # Per-channel symmetric quantization for INT6
+        #per-channel symmetric quantization for INT6
         max_vals = weight_data.abs().max(dim=1, keepdim=True)[0]
         scale = max_vals / 31  # 6-bit range: -32 to 31
         scale = torch.clamp(scale, min=1e-8)
         
-        # Quantize
+        #quantize
         weight_int6 = torch.round(weight_data / scale)
         weight_int6 = torch.clamp(weight_int6, -32, 31).to(torch.int8)
         
@@ -244,11 +240,10 @@ class QuantizedLinearINT6(nn.Module):
         return quantized
     
     def forward(self, x):
-        # ADD CACHE CHECK AT THE START
         if self._use_cache and self._cached_weight is not None:
             return F.linear(x, self._cached_weight, self.bias)
         
-        # Dequantize weights
+        #dequantize weights
         weight = self.weight_int8.float() * self.scale
         
         # CACHE THE DEQUANTIZED WEIGHT
@@ -264,11 +259,10 @@ class QuantizedConv1D(nn.Module):
         super().__init__()
         self.quantized_linear = quantized_linear
         
-        # Store proper attributes for GPT-2 compatibility
         self.nf = quantized_linear.out_features
         self.nx = quantized_linear.in_features
         
-        # Set dummy weight for compatibility (actual weights are in quantized_linear)
+        #dummy weight for compatibility 
         self.register_buffer('weight', torch.zeros(1, 1))
     
     def forward(self, x):
@@ -276,7 +270,7 @@ class QuantizedConv1D(nn.Module):
         size_out = x.size()[:-1] + (self.nf,)
         x_flat = x.reshape(-1, self.nx)
         
-        # Use the quantized linear layer's forward method
+        #quantized linear layer's forward method
         x_out = self.quantized_linear(x_flat)
         
         return x_out.view(size_out)
@@ -292,7 +286,7 @@ class QuantizedEmbeddingINT8(nn.Module):
         # [num_embeddings, embedding_dim]
         self.register_buffer("weight_int8", weight_int8)  # int8
         self.register_buffer("scale", scale)              # float32
-        # light metadata (handy for debugging)
+       
         self.num_embeddings = weight_int8.size(0)
         self.embedding_dim = weight_int8.size(1)
 
@@ -300,16 +294,16 @@ class QuantizedEmbeddingINT8(nn.Module):
     def from_float(cls, emb: nn.Embedding) -> "QuantizedEmbeddingINT8":
         W = emb.weight.detach()
         # symmetric per-row scales: max(|row|)/127 (avoid zero scale)
-        scale = W.abs().amax(dim=1).clamp(min=1e-8) / 127.0            # [N]
-        Wq = torch.round(W / scale.unsqueeze(1)).to(torch.int8)        # [N, D]
+        scale = W.abs().amax(dim=1).clamp(min=1e-8) / 127.0          # [N]
+        Wq = torch.round(W / scale.unsqueeze(1)).to(torch.int8)     # [N, D]
         return cls(Wq, scale)
 
     def forward(self, input_ids: torch.LongTensor) -> torch.Tensor:
         # Dequantize only the rows we need this step
-        flat = input_ids.view(-1)                                      # [B*T]
-        rows = self.weight_int8.index_select(0, flat).float()          # [B*T, D]
-        s = self.scale.index_select(0, flat).unsqueeze(1)              # [B*T, 1]
-        rows = rows * s                                                # dequant
+        flat = input_ids.view(-1)                                     # [B*T]
+        rows = self.weight_int8.index_select(0, flat).float()      # [B*T, D]
+        s = self.scale.index_select(0, flat).unsqueeze(1)       # [B*T, 1]
+        rows = rows * s                    # dequant
         B, T = input_ids.shape
         D = rows.shape[-1]
         return rows.view(B, T, D)
@@ -377,7 +371,6 @@ class LayerSensitivityAnalyzer:
         """Analyze layer sensitivity using multiple metrics"""
         print("[Analysis] Analyzing layer sensitivity to quantization...")
         
-        # Hook to capture activations
         handles = []
         
         def hook_fn(name):
@@ -388,13 +381,13 @@ class LayerSensitivityAnalyzer:
                     self.activation_stats[name]['max'] = output.abs().max().item()
             return hook
         
-        # Register hooks for all linear layers
+       
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.Linear, nn.Conv1d)) or module.__class__.__name__ == 'Conv1D':
                 handle = module.register_forward_hook(hook_fn(name))
                 handles.append(handle)
         
-        # Run forward pass with sample data if provided
+        #forward pass with sample data
         if self.sample_data is not None:
             with torch.no_grad():
                 if isinstance(self.sample_data, torch.Tensor):
@@ -404,7 +397,7 @@ class LayerSensitivityAnalyzer:
         for handle in handles:
             handle.remove()
         
-        # Calculate sensitivity scores
+        
         for name, module in self.model.named_modules():
             if self._should_analyze(module, name):
                 score = self._calculate_sensitivity_score(name, module)
@@ -414,15 +407,15 @@ class LayerSensitivityAnalyzer:
     
     def _should_analyze(self, module, name):
         """Check if module should be analyzed"""
-        # Skip embeddings and layer norms
+        
         if any(skip in name.lower() for skip in ['embed', 'wte', 'wpe', 'ln', 'norm']):
             return False
         
-        # Check if it has weights
+  
         if not hasattr(module, 'weight'):
             return False
         
-        # Only 2D weights
+      
         if len(module.weight.shape) != 2:
             return False
         
@@ -433,7 +426,7 @@ class LayerSensitivityAnalyzer:
         score = 0.0
         weight = module.weight.data
         
-        # Factor 1: Weight magnitude variation (high variation = sensitive)
+        #weight magnitude variation (high variation = sensitive)
         weight_std = weight.std().item()
         weight_mean = abs(weight.mean().item())
         if weight_mean > 1e-8:
@@ -441,51 +434,50 @@ class LayerSensitivityAnalyzer:
         else:
             variation_score = min(weight_std, 1.0)
         
-        # Factor 2: Weight range (large range = sensitive)
+        #weight range (large range = sensitive)
         weight_range = (weight.max() - weight.min()).item()
         range_score = min(weight_range / 10.0, 1.0)  # Normalize to [0, 1]
         
-        # Factor 3: Activation statistics (if available)
+        #activation statistics
         activation_score = 0.0
         if name in self.activation_stats:
             stats = self.activation_stats[name]
             if 'max' in stats:
                 activation_score = min(stats['max'] / 10.0, 1.0)
         
-        # Factor 4: Layer position (early and late layers more sensitive)
+        #(early and late layers more sensitive)
         position_score = self._get_position_score(name)
         
-        # Combine factors with adjusted weights for better distribution
         score = (variation_score * 0.2 + 
                 range_score * 0.2 + 
                 activation_score * 0.1 + 
-                position_score * 0.5)  # Position is most important
+                position_score * 0.5)  
         
         return score
     
     def _get_position_score(self, name):
         """Score based on layer position (early/late layers more sensitive)"""
-        # GPT-2 specific patterns
-        if 'h.0.' in name:  # First transformer block
+        #GPT-2 specific patterns
+        if 'h.0.' in name: 
             if 'attn' in name:
-                return 0.9  # Keep first attention layers high quality
+                return 0.9  
             else:
                 return 0.6  # MLP can be quantized
-        elif 'h.1.' in name:  # Second block
+        elif 'h.1.' in name: 
             return 0.5
-        elif 'h.10.' in name or 'h.11.' in name:  # Last two blocks (for 12-layer model)
-            if 'c_proj' in name:  # Output projections more important
+        elif 'h.10.' in name or 'h.11.' in name: 
+            if 'c_proj' in name:  
                 return 0.85
             else:
                 return 0.45
-        elif 'ln_f' in name or 'head' in name or 'lm_head' in name:  # Final layers
+        elif 'ln_f' in name or 'head' in name or 'lm_head' in name:  
             return 0.95
-        elif 'wte' in name or 'wpe' in name:  # Embeddings (shouldn't quantize)
+        elif 'wte' in name or 'wpe' in name:  #embeddings 
             return 1.0
-        elif any(f'h.{i}.' in name for i in [2, 3, 4, 5, 6, 7, 8, 9]):  # Middle layers
-            return 0.15  # Much less sensitive, aggressive quantization
+        elif any(f'h.{i}.' in name for i in [2, 3, 4, 5, 6, 7, 8, 9]):  
+            return 0.15  #much less sensitive, aggressive quantization
         else:
-            return 0.4  # Default
+            return 0.4  
 
 class AdaptiveQuantizer:
     """Main class for adaptive mixed-precision quantization"""
@@ -504,32 +496,32 @@ class AdaptiveQuantizer:
         """Create optimal quantization plan for the model"""
         print("[Quantization] Creating adaptive quantization plan...")
         
-        # Analyze sensitivity
+        #analyze sensitivity
         analyzer = LayerSensitivityAnalyzer(model, sample_data)
         sensitivity_scores = analyzer.analyze_sensitivity()
         
-        # Sort layers by sensitivity
+        #sort layers by sensitivity
         sorted_layers = sorted(sensitivity_scores.items(), key=lambda x: x[1])
         
-        # Calculate memory for each configuration
+        
         total_params = sum(p.numel() for p in model.parameters())
         current_memory_ratio = 0.0
         
-        # Assign bit widths based on sensitivity
+      
         for layer_name, sensitivity in sorted_layers:
-            if sensitivity > 0.8:  # Very sensitive - keep original
+            if sensitivity > 0.8:  
                 self.quantization_config[layer_name] = 'fp16'
                 memory_contrib = self._get_layer_params(model, layer_name) / total_params * 1.0
-            elif sensitivity > 0.4:  # Moderately sensitive - INT8 with care
+            elif sensitivity > 0.4:  
                 self.quantization_config[layer_name] = 'int8'
                 memory_contrib = self._get_layer_params(model, layer_name) / total_params * 0.25
-            else:  # Not sensitive - aggressive INT8
+            else:  
                 self.quantization_config[layer_name] = 'int8'
                 memory_contrib = self._get_layer_params(model, layer_name) / total_params * 0.25
             
             current_memory_ratio += memory_contrib
             
-            # Stop if we hit memory target
+            #if we hit memory target
             if current_memory_ratio >= (1 - self.memory_target):
                 break
         
@@ -568,13 +560,11 @@ class AdaptiveQuantizer:
             config = self.quantization_config[full_name]
             
             if config == 'fp16':
-                # For FP16, we don't actually convert the layer itself
-                # We just mark it to be kept at higher precision
-                # The actual FP16 conversion should be done at model level if needed
+              
                 print(f"  Keeping in higher precision: {full_name}")
                 fp16_count += 1
             elif config == 'int8':
-                # Quantize to INT8
+                #quantize to INT8
                 try:
                     if isinstance(module, nn.Linear):
                         quantized = QuantizedLinear.from_float(module, bits=8)
@@ -582,14 +572,14 @@ class AdaptiveQuantizer:
                         print(f"  Quantized to INT8: {full_name}")
                         quantized_count += 1
                     elif module.__class__.__name__ == 'Conv1D':
-                        # Handle Conv1D layers
+                        #handle Conv1D layers
                         weight_data = module.weight.data.t()
                         temp_module = nn.Linear(weight_data.shape[1], weight_data.shape[0])
                         temp_module.weight.data = weight_data
                         temp_module.bias = module.bias if hasattr(module, 'bias') else None
                         
                         quantized = QuantizedLinear.from_float(temp_module, bits=8)
-                        # Wrap in Conv1D wrapper
+                        #wrap in Conv1D wrapper
                         quantized_conv = QuantizedConv1D(quantized)
                         setattr(parent, name, quantized_conv)
                         print(f"  Quantized Conv1D to INT8: {full_name}")
@@ -621,7 +611,6 @@ def make_it_work_adaptive(model, sample_data=None, memory_target=0.4):
     model = quantizer.apply_quantization(model)
     return model
 
-# Keep your original quantize_model function for backward compatibility
 def quantize_model(model):
     """
     Original uniform quantization - handles Linear, Conv1D, and other layer types
@@ -704,7 +693,7 @@ def quantize_model(model):
         
     return model
 
-# Backward compatibility wrapper
+#backward compatibility wrapper
 def make_it_work(model, adaptive=True, **kwargs):
     """Main API - now with adaptive quantization by default"""
     if adaptive:
@@ -712,7 +701,6 @@ def make_it_work(model, adaptive=True, **kwargs):
     else:
         return quantize_model(model)
 
-# Test code when running as script
 if __name__ == "__main__":
     """Test the adaptive quantization with GPT-2"""
     import time
@@ -722,24 +710,24 @@ if __name__ == "__main__":
     print("GPU-POOR: Advanced Adaptive Quantization Test")
     print("="*60)
     
-    # Load model and tokenizer
+    
     print("\n[1/4] Loading GPT-2 model...")
-    model_name = "gpt2"  # You can also try "gpt2-medium" for larger model
+    model_name = "gpt2" 
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     model = GPT2LMHeadModel.from_pretrained(model_name)
     model.eval()
     
-    # Calculate original size
+  
     original_params = sum(p.numel() * p.element_size() for p in model.parameters())
     print(f"Original model size: {original_params / 1024**2:.2f} MB")
     
-    # Prepare sample data for sensitivity analysis
+   
     print("\n[2/4] Preparing calibration data...")
     sample_text = "The quick brown fox jumps over the lazy dog. "
     inputs = tokenizer(sample_text, return_tensors="pt")
     sample_data = inputs["input_ids"]
     
-    # Test original model generation
+    #test original model generation
     print("\n[3/4] Testing original model generation...")
     tokenizer.pad_token = tokenizer.eos_token
     test_prompt = "The future of artificial intelligence is"
@@ -758,48 +746,44 @@ if __name__ == "__main__":
     original_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(f"Original output:\n  {original_text}")
     
-    # Apply adaptive quantization
+    #adaptive quantization
     print("\n[4/4] Applying adaptive quantization...")
     print("-" * 40)
     
-    # You can test different approaches:
-    # Option 1: Adaptive quantization (recommended)
+
     quantized_model = make_it_work_adaptive(
         model, 
         sample_data=sample_data,
-        memory_target=0.4  # Target 40% of original size
+        memory_target=0.4  #target 40%
     )
     
-    # Option 2: If you want to compare with the old uniform quantization
-    # quantized_model = quantize_model(model)  # Your original function
-    
+    #old uniform quantization
     print("-" * 40)
     
-    # Calculate quantized size (approximate)
+   
     quantized_params = 0
     int8_layers = 0
     original_layers = 0
     
     for name, module in quantized_model.named_modules():
         if isinstance(module, QuantizedLinear):
-            # INT8 weights take 1/4 the space of FP32
-            quantized_params += module.weight_quantized.numel() * 1  # 1 byte per INT8
+            #INT8 weights take 1/4 the space of FP32
+            quantized_params += module.weight_quantized.numel() * 1  
             if module.bias is not None:
-                quantized_params += module.bias.numel() * 4  # Bias stays FP32
+                quantized_params += module.bias.numel() * 4  
             int8_layers += 1
         elif isinstance(module, QuantizedConv1D):
-            # Conv1D wrapper - count the underlying quantized linear
             quantized_params += module.quantized_linear.weight_quantized.numel() * 1
             if module.quantized_linear.bias is not None:
                 quantized_params += module.quantized_linear.bias.numel() * 4
             int8_layers += 1
-        elif isinstance(module, QuantizedEmbeddingINT8):   # <<< NEW
-            # int8 weights (1 byte each) + per-row float32 scale
+        elif isinstance(module, QuantizedEmbeddingINT8):   #<<< NEW
+            #int8 weights (1 byte each) + per-row float32 scale
             quantized_params += module.weight_int8.numel() * 1
             quantized_params += module.scale.numel() * 4
             int8_layers += 1
         elif hasattr(module, 'weight'):
-            # Non-quantized layers
+            #non-quantized layers
             quantized_params += module.weight.numel() * module.weight.element_size()
             if hasattr(module, 'bias') and module.bias is not None:
                 quantized_params += module.bias.numel() * module.bias.element_size()
@@ -808,7 +792,7 @@ if __name__ == "__main__":
     print(f"\nQuantized model size: {quantized_params / 1024**2:.2f} MB")
     print(f"Memory reduction: {(1 - quantized_params/original_params) * 100:.1f}%")
     
-    # Test quantized model generation
+
     print("\n[Testing] Quantized model generation...")
     with torch.no_grad():
         outputs = quantized_model.generate(
@@ -822,8 +806,7 @@ if __name__ == "__main__":
     
     quantized_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     print(f"Quantized output:\n  {quantized_text}")
-    
-    # Check for repetition
+
     print("\n[Analysis] Checking for repetitive patterns...")
     words = quantized_text.split()
     repetitions = 0
@@ -841,7 +824,7 @@ if __name__ == "__main__":
     print("Test complete! Compare the outputs above.")
     print("="*60)
     
-    # Optional: Interactive testing
+    #Interactive testing
     print("\nWant to test with your own prompts? (y/n): ", end="")
     import sys
     response = input().strip().lower()

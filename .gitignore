@@ -1,6 +1,3 @@
-# -----------------------------
-# Python build / artifacts
-# -----------------------------
 __pycache__/
 *.py[cod]
 *.so
@@ -11,18 +8,10 @@ __pycache__/
 build/
 dist/
 pip-wheel-metadata/
-
-# -----------------------------
-# Virtual environments
-# -----------------------------
 venv/
 .venv/
 env/
 ENV/
-
-# -----------------------------
-# Caches & tooling
-# -----------------------------
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -30,18 +19,12 @@ ENV/
 .nox/
 .tox/
 .cache/
-
-# -----------------------------
-# Logs & results (directories)
-# -----------------------------
 logs/
-results/
-
+results/*.json
+results/gpt2-large.json
 *.log
-
-# -----------------------------
-# Data / model artifacts
-# -----------------------------
+!results/charts/
+!results/charts/*.png
 *.bin
 *.safetensors
 *.pt
@@ -54,28 +37,16 @@ results/
 *.zip
 *.gz
 *.xz
-
-# Hugging Face / datasets caches 
 hf_cache/
 cache/
 data/
 datasets/
-
-# -----------------------------
-# Env / secrets
-# -----------------------------
 .env
 .env.*
 *.env
 *.secret
 .git-credentials
-
-# -----------------------------
-# Editors / OS
-# -----------------------------
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-

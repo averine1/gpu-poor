@@ -3,11 +3,11 @@
 **Run large language models in 74% less memory, at 95% speed.**
 
 Pure Python INT8 quantization for memory-constrained deployment.
-
 ```python
-from gpu_poor import quantize
+from gpu_poor.hybrid_a3qer import make_it_work_hybrid
 
-model = quantize(model)  # 3GB → 767MB, 0.95× speed, 0.90 BLEU
+model = make_it_work_hybrid(model, sample_inputs=calibration_data)
+# Result: 3GB → 767MB, 0.95× speed, 0.90 BLEU
 ```
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -35,8 +35,6 @@ gpu-poor uses INT8 quantization to compress large models by 74% with minimal qua
 
 ### Results
 
-![Performance Dashboard](results/charts/summary.png)
-
 **GPT-2-large (774M parameters, 3GB)**
 
 | Metric | Before | After | Change | Target |
@@ -52,20 +50,18 @@ gpu-poor uses INT8 quantization to compress large models by 74% with minimal qua
 
 ## Quality Metrics
 
-![Quality Evaluation](assets/quality.png)
-
 ### BLEU Score: 0.900
 
 **What it means:** Quantized model generates 90% similar text to baseline
 - Industry target for INT8: >0.90 ✅
 - Our result: Meets production standard
-- Sample generations show perfect matches
+- Sample generations show high similarity
 
 ### Perplexity: +1.9%
 
 **What it means:** Model's prediction confidence decreases by only 1.9%
 - Industry target for INT8: <5% ✅
-- Our result: **Exceptional** (well below target)
+- Result: **Good** (well below target)
 - Indicates minimal impact on language understanding
 
 See [RESULTS.md](RESULTS.md) for detailed quality analysis and sample generations.
@@ -90,20 +86,28 @@ Quantization overhead (~0.2s) becomes negligible as model size increases:
 
 ### Installation
 ```bash
-pip install gpu-poor
+git clone https://github.com/averine1/gpu-poor
+cd gpu-poor
+pip install -e .
 ```
+
+**Note:** Not yet published to PyPI. Install from source for now.
 
 ### Basic Usage
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from gpu_poor import quantize
+from gpu_poor.hybrid_a3qer import make_it_work_hybrid
 
 # Load model
 model = AutoModelForCausalLM.from_pretrained("gpt2-large")
 tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
 
-# Quantize (one line)
-model = quantize(model)
+# Create calibration data
+sample_text = ["The future of AI is", "Machine learning enables"]
+sample_inputs = tokenizer(sample_text, return_tensors="pt", padding=True)
+
+# Quantize
+model = make_it_work_hybrid(model, sample_inputs=sample_inputs["input_ids"])
 
 # Use normally
 inputs = tokenizer("The future of AI is", return_tensors="pt")
@@ -216,7 +220,7 @@ Benefit: On-device inference, better privacy
 
 ### Custom Quantization Settings
 ```python
-from gpu_poor import make_it_work_hybrid
+from gpu_poor.hybrid_a3qer import make_it_work_hybrid
 
 # More control over quantization
 model = make_it_work_hybrid(
@@ -230,15 +234,10 @@ model = make_it_work_hybrid(
 
 ### Benchmarking
 ```python
-from gpu_poor.examples import demo
+# Run the demo script
+python examples/demo.py gpt2-large
 
-# Run full benchmark with quality metrics
-results = demo.demo_production_ready("gpt2-large")
-
-print(f"Compression: {results['compression_ratio']:.1f}%")
-print(f"Speed: {results['speedup_x']:.2f}×")
-print(f"BLEU: {results['bleu_score']:.3f}")
-print(f"Perplexity: {results['perplexity_degradation_pct']:+.1f}%")
+# Results saved to results/gpt2-large.json
 ```
 
 ---
@@ -247,7 +246,6 @@ print(f"Perplexity: {results['perplexity_degradation_pct']:+.1f}%")
 
 - **[RESULTS.md](RESULTS.md)** - Complete benchmark results with quality analysis
 - **[examples/](examples/)** - Usage examples and benchmarking scripts
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 
 ---
 
@@ -275,21 +273,7 @@ Contributions welcome! Areas of interest:
 - Performance optimizations (custom kernels)
 - Quality improvements (QAT support)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
----
-
-## Citation
-
-```bibtex
-@software{gpupoor2024,
-  author = {Your Name},
-  title = {gpu-poor: Memory-Efficient INT8 Quantization for Large Language Models},
-  year = {2024},
-  url = {https://github.com/averine1/gpu-poor},
-  note = {74\% compression, BLEU 0.90, Perplexity +1.9\%}
-}
-```
+Open an issue or submit a PR to discuss.
 
 ---
 

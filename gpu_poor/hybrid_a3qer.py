@@ -11,16 +11,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-# Optional: Hugging Face GPT-2 Conv1D alias (treat like Linear if available)
+# Hugging Face GPT-2 Conv1D alias 
 try:
     from transformers.models.gpt2.modeling_gpt2 import Conv1D as HFConv1D
 except Exception:
-    HFConv1D = None  # type: ignore[assignment]
+    HFConv1D = None 
 
 def _is_linear_like(m: nn.Module) -> bool:
     if isinstance(m, (nn.Linear, nn.Conv1d)):
         return True
-    if HFConv1D is not None and isinstance(m, HFConv1D):  # type: ignore[arg-type]
+    if HFConv1D is not None and isinstance(m, HFConv1D): 
         return True
     return m.__class__.__name__ == "Conv1D"
 
@@ -49,12 +49,12 @@ class LayerCriticalityAnalyzer:
 
         def create_attention_hook(name):
             def hook(module, inp, out):
-                # Normalize output from various HF attention modules
+                #normalizing output from various HF attention modules
                 attn = None
                 if isinstance(out, torch.Tensor):
                     attn = out
                 elif isinstance(out, (tuple, list)) and out and isinstance(out[-1], torch.Tensor):
-                    attn = out[-1]  # many modules keep attention probs last
+                    attn = out[-1]  #many modules keep attention probs last
                 elif isinstance(out, dict):
                     cand = out.get("attn_probs") or out.get("attentions") or out.get("attention_probs")
                     if isinstance(cand, torch.Tensor):
@@ -141,7 +141,7 @@ class LayerCriticalityAnalyzer:
         INT8-only strategy for maximum CPU speed.
         Mixed precision (INT4/6) is too slow on CPU.
         """
-        # Parse layer position
+        #parse layer position
         layer_num = -1
         if 'h.' in layer_name:
             try:
@@ -149,7 +149,7 @@ class LayerCriticalityAnalyzer:
             except:
                 pass
         
-        # Keep ONLY first block's output projections in FP32 for numerical stability
+        #KEEPING ONLY! first block's output projections in FP32 for numerical stability
         if layer_num == 0 and ('c_proj' in layer_name or 'mlp.c_proj' in layer_name):
             return {
                 'quantize': False,
@@ -157,11 +157,11 @@ class LayerCriticalityAnalyzer:
                 'bits': None
             }
         
-        # Everything else: INT8 with smoothing
+        #Everything else INT8 with smoothing
         return {
             'quantize': True,
             'smooth': True,
-            'bits': 8,  # Pure INT8 - fastest dequantization on CPU
+            'bits': 8,  #pure INT8 - fastest dequantization on CPU
             'protect_ratio': 0.02
         }
 
@@ -178,38 +178,38 @@ class ImprovedActivationSmoother:
         Smooth only the outlier channels, preserve normal ones
         Handle both Linear and Conv1D weight dimensions
         """
-        # Get activation statistics
+        #activation statistics
         if activations.dim() == 3:  # (batch, seq, features)
             act_max = activations.abs().max(dim=0)[0].max(dim=0)[0]
             act_mean = activations.abs().mean(dim=[0, 1])
-        else:  # (batch, features)
+        else:  #(batch, features)
             act_max = activations.abs().max(dim=0)[0]
             act_mean = activations.abs().mean(dim=0)
         
-        # Identify outlier channels
-        outlier_mask = act_max > (act_mean * 10)  # 10x threshold
+        #outlier channels
+        outlier_mask = act_max > (act_mean * 10)  #10x threshold
         
-        # Create per-channel smoothing factors
+        #per-channel smoothing factors
         smooth_factor = torch.ones_like(act_max)
         
         if outlier_mask.any():
-            # Only smooth outliers
+            #only smooth outliers
             outlier_scale = act_max[outlier_mask] / (act_mean[outlier_mask] * 5)
             smooth_factor[outlier_mask] = outlier_scale.pow(self.alpha).clamp(min=0.1, max=10)
         
-        # Apply selective smoothing to activations
+        #selective smoothing to activations
         if activations.dim() == 3:
             smoothed_acts = activations / smooth_factor.unsqueeze(0).unsqueeze(0)
         else:
             smoothed_acts = activations / smooth_factor.unsqueeze(0)
         
-        # Compensate in weights - handle different weight formats
+        #compensateing in weights to handle different weight formats
         compensated_weights = weights.clone()
         
-        # For Conv1D in GPT-2: weights are (in_features, out_features)
-        # For Linear: weights are (out_features, in_features)
+        #noting, For Conv1D in GPT-2: weights are (in_features, out_features)
+        #noting, For Linear: weights are (out_features, in_features)
         if weights.dim() == 2:
-            # Check if this is Conv1D format (in_features matches smooth_factor size)
+            #checking format in_features matches smooth_factor size
             if weights.shape[0] == smooth_factor.shape[0]:
                 # Conv1D case: scale input dimension
                 compensated_weights = weights * smooth_factor.unsqueeze(1)
@@ -217,7 +217,7 @@ class ImprovedActivationSmoother:
                 # Linear case: scale input dimension (dim=1)
                 compensated_weights = weights * smooth_factor.unsqueeze(0)
             else:
-                # Dimension mismatch - skip smoothing
+                # but if there is a dimension mismatch skip smoothing
                 print(f"    [Warning] Dimension mismatch, skipping smoothing")
                 return activations, weights, smooth_factor
         
@@ -246,7 +246,7 @@ class HybridA3QER:
         # ----- forward hook that safely grabs the first tensor input -----
         def create_hook(name):
             def hook(module, input, output):
-                # input is a tuple; find first tensor inside it (possibly nested)
+                #input is a tuple, find first tensor inside it (possibly nested)
                 tensor = None
                 if input:
                     x = input[0]
@@ -269,10 +269,10 @@ class HybridA3QER:
 
         if isinstance(sample_inputs, dict):
             call_kwargs = dict(sample_inputs)  # shallow copy
-            # create attention_mask if missing
+            #create attention_mask if missing
             if "input_ids" in call_kwargs and "attention_mask" not in call_kwargs:
                 call_kwargs["attention_mask"] = torch.ones_like(call_kwargs["input_ids"])
-            # add decoder_input_ids for seq2seq if missing
+            #add decoder_input_ids for seq2seq if missing
             if is_seq2seq and "decoder_input_ids" not in call_kwargs:
                 bsz = call_kwargs["input_ids"].size(0)
                 device = call_kwargs["input_ids"].device
@@ -284,7 +284,7 @@ class HybridA3QER:
                 )
 
         elif isinstance(sample_inputs, (list, tuple)):
-            # Try to upcast simple tuples into kwargs: (input_ids[, attention_mask])
+            #trying to upcast simple tuples into kwargs: (input_ids[, attention_mask])
             if len(sample_inputs) in (1, 2) and isinstance(sample_inputs[0], torch.Tensor):
                 input_ids = sample_inputs[0]
                 attention_mask = sample_inputs[1] if len(sample_inputs) == 2 and isinstance(sample_inputs[1], torch.Tensor) \
@@ -300,11 +300,10 @@ class HybridA3QER:
                         (bsz, 1), dec_start, dtype=input_ids.dtype, device=device
                     )
             else:
-                # Complex positional signature: just pass through
+                
                 call_args = tuple(sample_inputs)
 
         elif isinstance(sample_inputs, torch.Tensor):
-            # Raw input_ids tensor
             input_ids = sample_inputs
             attention_mask = torch.ones_like(input_ids)
             call_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
@@ -318,7 +317,7 @@ class HybridA3QER:
                     (bsz, 1), dec_start, dtype=input_ids.dtype, device=device
                 )
         else:
-            # Unknown type—let it pass through positionally
+            #unknown type—let it pass through positionally
             call_args = (sample_inputs,)
 
         # ----- run one forward pass to collect activations -----
@@ -328,7 +327,7 @@ class HybridA3QER:
             elif call_args is not None:
                 _ = model(*call_args)
             else:
-                # final fallback
+                #fallback
                 _ = model(sample_inputs)
 
         # ----- remove hooks and collate -----
@@ -356,15 +355,15 @@ class HybridA3QER:
 
         want_emb_q = bool(getattr(self, "quantize_embeddings", False))
 
-        # Step 1: Collect calibration data
+        #collect calibration data
         self.collect_calibration_data(model, sample_inputs)
 
-        # Step 2: Analyze layer criticality
+        #analyze layer criticality
         print("\n[Phase 1] Analyzing layer criticality...")
         analyzer = LayerCriticalityAnalyzer(model, sample_inputs)
         layer_importance = analyzer.analyze_attention_patterns()
 
-        # Step 3: Quantize layers with mixed precision
+        #quantize layers with mixed precision
         print("\n[Phase 2] Applying mixed-precision quantization...")
 
         from .quantization import (
@@ -379,7 +378,7 @@ class HybridA3QER:
 
         quantized_count = {'int4': 0, 'int6': 0, 'int8': 0, 'fp32': 0, 'int8_emb': 0, 'int8_lmhead': 0}
         smoothed_count = 0
-        embedding_registry = {}  # Track embeddings: {(vocab_size, embed_dim): qemb}
+        embedding_registry = {}  #tracking embeddings: {(vocab_size, embed_dim): qemb}
 
         # ============================================================
         # PASS 1: Handle embeddings first
@@ -400,7 +399,7 @@ class HybridA3QER:
             
             lname = name.lower()
             if 'lm_head' in lname or 'head' in lname:
-                continue  # Skip lm_head, handle in pass 2
+                continue  
             
             if want_emb_q and QuantizedEmbeddingINT8 is not None:
                 try:
@@ -444,7 +443,7 @@ class HybridA3QER:
                     key = (vocab_size, embed_dim)
                     
                     if key in embedding_registry:
-                        # Weight tying: reuse embedding
+                        
                         qemb = embedding_registry[key]
                         qlmhead = QuantizedLMHeadINT8.from_embedding(
                             qemb, bias=module.bias.data if module.bias is not None else None
@@ -453,7 +452,7 @@ class HybridA3QER:
                         print(f"  [INT8-LMHEAD(shared)] {name} - tied to {key}")
                         quantized_count['int8_lmhead'] += 1
                     else:
-                        # Standalone
+               
                         qlmhead = QuantizedLMHeadINT8.from_float(module)
                         setattr(parent, module_name, qlmhead)
                         print(f"  [INT8-LMHEAD(standalone)] {name}")
@@ -471,8 +470,7 @@ class HybridA3QER:
         print("\n[Pass 3] Processing linear layers...")
         for name, module in list(model.named_modules()):
             lname = name.lower()
-            
-            # Skip already handled
+           
             if isinstance(module, nn.Embedding):
                 continue
             if 'lm_head' in lname or 'head' in lname:
@@ -509,15 +507,6 @@ class HybridA3QER:
 
                 B = module.bias.data if hasattr(module, 'bias') and module.bias is not None else None
 
-                # if config.get('smooth', False) and name in self.calibration_cache:
-                #     activations = self.calibration_cache[name]
-                #     try:
-                #         _, compensated_W, _ = self.smoother.smooth_activations(activations, W)
-                #         smoothed_count += 1
-                #     except Exception:
-                #         compensated_W = W
-                # else:
-                #     compensated_W = W
 
                 compensated_W = W
 
@@ -568,7 +557,7 @@ class HybridA3QER:
                 quantized_count['int6'] * 0.1875 +
                 quantized_count['int8'] * 0.25 +
                 quantized_count['int8_emb'] * 0.25 +
-                quantized_count['int8_lmhead'] * 0.0 +  # Shared
+                quantized_count['int8_lmhead'] * 0.0 +  
                 quantized_count['fp32'] * 1.0
             ) / total_layers
         else:

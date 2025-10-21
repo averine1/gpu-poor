@@ -12,7 +12,7 @@ class UniversalModelAdapter:
     No manual configuration needed!
     """
     
-    # Pattern matching for different architectures
+    #pattern matching for different architectures
     PATTERNS = {
         'attention': [
             r'.*attention.*', r'.*attn.*', r'.*self_attn.*',
@@ -37,7 +37,7 @@ class UniversalModelAdapter:
     
     def __init__(self, model):
         self.model = model
-        self.layers = {}  # Initialize layers first!
+        self.layers = {} 
         self.model_info = self._analyze_model()
         
     def _analyze_model(self) -> Dict[str, Any]:
@@ -59,7 +59,7 @@ class UniversalModelAdapter:
         """Detect model type from class name or config"""
         model_class = self.model.__class__.__name__.lower()
         
-        # Check common model types
+        #common model types
         if 'gpt' in model_class:
             return 'gpt'
         elif 'bert' in model_class:
@@ -79,7 +79,7 @@ class UniversalModelAdapter:
         elif 'qwen' in model_class:
             return 'qwen'
         else:
-            # Try to detect from config
+            #detect from config
             if hasattr(self.model, 'config'):
                 config = self.model.config
                 if hasattr(config, 'model_type'):
@@ -103,14 +103,14 @@ class UniversalModelAdapter:
         layers = {}
         
         for name, module in self.model.named_modules():
-            # Skip if not quantizable
+           
             if not self._is_quantizable(module):
                 continue
             
-            # Categorize layer
+            #Categorize layer
             category = self._categorize_layer(name)
             
-            # Store layer info temporarily
+
             layers[name] = {
                 'module': module,
                 'category': category,
@@ -118,10 +118,10 @@ class UniversalModelAdapter:
                 'depth': self._get_layer_depth(name)
             }
         
-        # Store layers before computing criticality
+      
         self.layers = layers
         
-        # Now compute criticality with layers available
+       
         for name in list(layers.keys()):
             layers[name]['criticality'] = self._assess_criticality(name, layers[name]['category'])
         
@@ -129,17 +129,17 @@ class UniversalModelAdapter:
     
     def _is_quantizable(self, module) -> bool:
         """Check if module can be quantized"""
-        # Must have weight parameter
+        #must have weight parameter
         if not hasattr(module, 'weight'):
             return False
         
-        # Must be Linear-like layer
+        #Linear-like layer
         if not isinstance(module, (nn.Linear, nn.Conv1d)):
-            # Check for custom linear layers (like Conv1D in GPT-2)
+            #check for custom linear layers (like Conv1D in GPT-2)
             if module.__class__.__name__ not in ['Conv1D', 'Linear']:
                 return False
         
-        # Skip if too small (not worth quantizing)
+        #skip if too small(not worth quantizing)
         if hasattr(module, 'weight'):
             if module.weight.numel() < 1000:
                 return False
@@ -162,40 +162,39 @@ class UniversalModelAdapter:
         Assess layer criticality (0=not critical, 1=very critical)
         Based on empirical findings from research
         """
-        criticality = 0.5  # Default
+        criticality = 0.5  
         
-        # Get depth information
+        #depth information
         depth = self._get_layer_depth(name)
         total_depth = self._get_total_depth()
         relative_position = depth / max(total_depth, 1)
         
-        # First and last 10% of layers are critical
+
         if relative_position < 0.1 or relative_position > 0.9:
             criticality = 0.9
         
-        # Embeddings are always critical
+
         if category == 'embedding':
             criticality = 1.0
         
-        # Output heads are critical
+   
         elif category == 'head':
             criticality = 0.95
         
-        # Attention in first/last layers is critical
+
         elif category == 'attention':
             if relative_position < 0.15 or relative_position > 0.85:
                 criticality = 0.85
             else:
                 criticality = 0.4
         
-        # MLPs in middle layers are less critical
+  
         elif category == 'mlp':
             if 0.2 < relative_position < 0.8:
                 criticality = 0.3
             else:
                 criticality = 0.6
         
-        # Normalization layers should not be quantized
         elif category == 'normalization':
             criticality = 1.0
         
@@ -234,36 +233,35 @@ class UniversalModelAdapter:
             key=lambda x: (x[1]['criticality'], -x[1]['size'])
         )
         
-        # Calculate how much we need to quantize
+
         total_params = self.model_info['total_params']
         target_quantized = total_params * target_reduction
         current_quantized = 0
         
         for name, info in sorted_layers:
             if current_quantized >= target_quantized:
-                # Target reached, keep rest in original precision
+                #target reached, keep rest in original precision
                 configs[name] = {
                     'quantize': False,
                     'reason': 'target_reached'
                 }
             elif info['criticality'] > 0.9:
-                # Too critical to quantize
+                #too critical to quantize
                 configs[name] = {
                     'quantize': False,
                     'reason': 'critical_layer'
                 }
             else:
-                # Quantize this layer
+                
                 configs[name] = {
                     'quantize': True,
-                    'bits': 8,  # Use INT8 for quality
+                    'bits': 8,  #INT8 for quality
                     'smooth': info['category'] in ['attention', 'mlp'],
                     'category': info['category'],
                     'criticality': info['criticality']
                 }
-                current_quantized += info['size'] * 0.75  # INT8 saves 75%
+                current_quantized += info['size'] * 0.75 
         
-        # Print summary
         quantized = sum(1 for c in configs.values() if c.get('quantize'))
         kept = sum(1 for c in configs.values() if not c.get('quantize'))
         
@@ -291,38 +289,37 @@ def auto_quantize(model, calibration_data=None, target_reduction=0.5):
     print("AUTO-QUANTIZATION")
     print(f"{'='*60}")
     
-    # Analyze model
+   
     adapter = UniversalModelAdapter(model)
     
-    # Get optimal configuration
+    #optimal configuration
     config = adapter.get_quantization_config(target_reduction)
     
-    # Apply quantization
+    #quantization
     from .hybrid_a3qer import HybridA3QER
     
     quantizer = HybridA3QER()
     
-    # If no calibration data, create some basic samples
+    #some basic samples
     if calibration_data is None:
         print("[Warning] No calibration data provided, using random data")
-        # Create dummy data matching model input shape
+        #dummy data matching model input shape
         if hasattr(model, 'dummy_inputs'):
             calibration_data = model.dummy_inputs['input_ids']
         else:
             calibration_data = torch.randint(0, 1000, (4, 128))
     
-    # Collect calibration stats if needed
+  
     if any(c.get('smooth') for c in config.values()):
         quantizer.collect_calibration_data(model, calibration_data)
-    
-    # Apply quantization based on config
+  
     from .quantization import QuantizedLinear, QuantizedConv1D
     
     for name, layer_config in config.items():
         if not layer_config.get('quantize'):
             continue
         
-        # Get module and parent
+        #module and parent
         module = adapter.layers[name]['module']
         parent_name = '.'.join(name.split('.')[:-1]) if '.' in name else ''
         child_name = name.split('.')[-1]
@@ -332,7 +329,7 @@ def auto_quantize(model, calibration_data=None, target_reduction=0.5):
             for part in parent_name.split('.'):
                 parent = getattr(parent, part)
         
-        # Quantize
+ 
         try:
             if module.__class__.__name__ == 'Conv1D':
                 temp = nn.Linear(module.weight.shape[0], module.weight.shape[1])

@@ -30,19 +30,14 @@ def build_gen_kwargs(
     top_p=None,
     top_k=None,
 ):
-    """
-    Safe defaults for both causal and encoder–decoder models.
-    - Ensures pad_token_id exists
-    - Sets left padding for causal, right padding for seq2seq
-    - Provides decoder_input_ids for T5-like models
-    """
+    
     import torch
 
-    # Ensures pad token exists (e.g., GPT-2)
+  
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Base kwargs
+    #base kwargs
     kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": do_sample,
@@ -54,10 +49,9 @@ def build_gen_kwargs(
     if top_k is not None:
         kwargs["top_k"] = top_k
 
-    # Default
     tokenizer.padding_side = "left"
 
-    # Seq2seq (e.g., T5): right padding + decoder start token
+    #Seq2seq (T5): right padding + decoder start token
     if getattr(model.config, "is_encoder_decoder", False):
         tokenizer.padding_side = "right"
         if model.config.decoder_start_token_id is None:
@@ -91,7 +85,7 @@ def create_simple_calibration_data(model_name, tokenizer, n_samples=64, seq_leng
         "Artificial intelligence is transforming various industries.",
     ]
     
-    # Short samples to fill the batch
+    #short samples
     batch = (sample_texts * ((n_samples + len(sample_texts) - 1)//len(sample_texts)))[:n_samples]
     
     inputs = tokenizer(
@@ -119,20 +113,20 @@ def calculate_actual_model_size(model):
     total_bytes = 0
     layer_stats = {'int4': 0, 'int6': 0, 'int8': 0, 'int8_emb': 0, 'fp32': 0}
     
-    # Track what we've counted to avoid double-counting
+    #tracking for what counted to avoid double-counting
     counted_modules = set()
     
     for name, module in model.named_modules():
-        # Skip if already counted
+        #skips 
         if id(module) in counted_modules:
             continue
         
-        # Handle QuantizedConv1D wrapper
+        #handling wrappers
         if isinstance(module, QuantizedConv1D):
-            # Count the underlying linear, mark wrapper as counted
+            #counting the underlying linear, marking wrapper as counted
             counted_modules.add(id(module))
             module = module.quantized_linear
-            # Don't add to counted yet - let it be counted below
+            
         
         if isinstance(module, QuantizedLinearINT4):
             total_bytes += module.weight_packed.numel() * module.weight_packed.element_size()
@@ -168,11 +162,11 @@ def calculate_actual_model_size(model):
         
         elif QuantizedLMHeadINT8 is not None and isinstance(module, QuantizedLMHeadINT8):
             if module.weight_shared:
-                # Only count bias
+                #only counting bias
                 if module.bias is not None:
                     total_bytes += module.bias.numel() * module.bias.element_size()
             else:
-                # Count weights + scales + bias
+                #weights+scales+bias
                 total_bytes += module.weight_int8_T.numel() * 1
                 total_bytes += module.scale.numel() * 4
                 if module.bias is not None:
@@ -180,8 +174,8 @@ def calculate_actual_model_size(model):
             counted_modules.add(id(module))
             
         elif hasattr(module, 'weight') and module.weight is not None:
-            # Only count substantial FP32 layers (skip tiny ones)
-            if module.weight.numel() > 100:  # Skip very small layers
+            #only count substantial FP32 layers (skip tiny ones)
+            if module.weight.numel() > 100:  #kips very small layers
                 total_bytes += module.weight.numel() * module.weight.element_size()
                 if hasattr(module, 'bias') and module.bias is not None:
                     total_bytes += module.bias.numel() * module.bias.element_size()
@@ -201,7 +195,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
     
     print("\n[Quality] Running comprehensive evaluation...")
     
-    # Test prompts covering different domains
+    #testing prompts covering different domains
     test_prompts = [
         "The quick brown fox",
         "Machine learning is",
@@ -225,9 +219,9 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
     for prompt in test_prompts:
         inputs = tokenizer(prompt, return_tensors="pt", padding=True)
         
-        # Measure perplexity
+        #perplexity
         with torch.no_grad():
-            # Baseline
+            #Baseline
             try:
                 outputs_base = baseline_model(**inputs, labels=inputs["input_ids"])
                 ppl_base = math.exp(outputs_base.loss.item())
@@ -235,7 +229,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
             except:
                 ppl_base = None
             
-            # Quantized
+            #quantized
             try:
                 outputs_quant = optimized_model(**inputs, labels=inputs["input_ids"])
                 if hasattr(outputs_quant, 'loss') and outputs_quant.loss is not None:
@@ -247,12 +241,12 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
                 print(f"    [Warning] Perplexity calculation failed for quantized model: {e}")
                 ppl_quant = None
         
-        # Generate text for BLEU comparison
+        #BLEU comparison
         with torch.no_grad():
             gen_base = baseline_model.generate(
                 inputs["input_ids"],
                 max_new_tokens=30,
-                do_sample=False,  # Deterministic for comparison
+                do_sample=False,  
                 pad_token_id=tokenizer.pad_token_id
             )
             
@@ -263,11 +257,11 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
                 pad_token_id=tokenizer.pad_token_id
             )
         
-        # Decode
+        #Decoding
         text_base = tokenizer.decode(gen_base[0], skip_special_tokens=True)
         text_quant = tokenizer.decode(gen_quant[0], skip_special_tokens=True)
         
-        # Calculate BLEU (comparing quantized to baseline as reference)
+        #(comparing quantized to baseline as reference)
         reference = [text_base.split()]
         hypothesis = text_quant.split()
         
@@ -275,7 +269,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
                             smoothing_function=smoothing.method1)
         results['bleu_scores'].append(bleu)
         
-        # Store sample
+        #sample
         results['generation_samples'].append({
             'prompt': prompt,
             'baseline': text_base,
@@ -283,7 +277,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
             'bleu': bleu
         })
     
-    # Calculate averages
+    #calc averages
     avg_ppl_base = sum(results['perplexity_baseline']) / len(results['perplexity_baseline']) if results['perplexity_baseline'] else None
     avg_ppl_quant = sum(results['perplexity_quantized']) / len(results['perplexity_quantized']) if results['perplexity_quantized'] else None
     avg_bleu = sum(results['bleu_scores']) / len(results['bleu_scores'])
@@ -297,7 +291,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
         print(f"  Perplexity change: {ppl_degradation:+.1f}%")
     print(f"  BLEU score: {avg_bleu:.3f} (1.0 = identical to baseline)")
     
-    # Quality assessment
+    #quality assessment
     if avg_bleu > 0.95:
         quality = "Excellent"
     elif avg_bleu > 0.90:
@@ -315,7 +309,7 @@ def measure_quality_comprehensive(baseline_model, optimized_model, tokenizer, mo
         'perplexity_degradation_pct': ppl_degradation,
         'bleu_score': avg_bleu,
         'quality_rating': quality,
-        'samples': results['generation_samples'][:3]  # Keep first 3 for reporting
+        'samples': results['generation_samples'][:3]  #first 3 for reporting
     }
 
 
@@ -325,7 +319,7 @@ def demo_production_ready(model_name="gpt2"):
     print(f" INT4/INT6/INT8 Adaptive Quantization")
     print(f"{'='*70}")
     
-    # Loading model and tokenizer
+    #loading model and tokenizer
     print(f"\n[1/5] Loading {model_name}...")
     try:
         model = AutoModelForCausalLM.from_pretrained(model_name, token=hf_token())
@@ -339,12 +333,12 @@ def demo_production_ready(model_name="gpt2"):
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = 'left'  # Important for generation
+    tokenizer.padding_side = 'left'  #Generation!
     
     original_size = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
     print(f"Original size: {original_size:.1f} MB")
     
-    #  cal data
+    #cal data
     print("\n[2/5] Creating calibration data...")
     print("="*60)
     print("CALIBRATION DATA PREPARATION")
@@ -358,31 +352,31 @@ def demo_production_ready(model_name="gpt2"):
     )
     print(f"[Calibration] Created calibration tensor: {calibration_data.shape}")
     
-    # mixed-precision quantization
+    #mixed-precision quantization
     print("\n[3/5] Applying mixed-precision quantization...")
     print("="*60)
     print("MIXED-PRECISION QUANTIZATION")
     print("="*60)
     
-    # hybrid quantizer with mixed precision
+    #hybrid quantizer with mixed precision
     quantized_model = make_it_work_hybrid(
         model,
         sample_inputs=calibration_data,
         smoothing_alpha=0.3,
-        memory_target=0.4  # Target 40% of original size
+        memory_target=0.4  #Target 40% of original size
     )
     
     print("[Success] Model quantized with mixed precision!")
     
-    # Calculating actual compressed size
+    #Calculating actual compressed size
     compressed_size, layer_stats = calculate_actual_model_size(quantized_model)
     
-# Optimizing for inference
+#Optimizing for inference
     print("\n[4/5] Optimizing for inference speed...")
     optimized_model = OptimizedModel(quantized_model)
-    optimized_model.optimize()  # This does ALL the pre-caching now
-    
-    # === GPU-POOR DIAGNOSTICS START ===
+    optimized_model.optimize()  #pre-caching now
+
+
     if os.getenv("GPU_POOR_DIAG", "0") == "1":
         print("\n" + "="*60)
         print("GPU-POOR DIAGNOSTICS")
@@ -440,11 +434,11 @@ def demo_production_ready(model_name="gpt2"):
                     print(f"  [FP32-LMHEAD] {n}: {size_mb:.1f} MB")
         
         print("="*60)
-    # === GPU-POOR DIAGNOSTICS END ===
+
 
     print("\n[5/5] Benchmarking and Quality Evaluation...")
     
-    # Quality evaluation FIRST (use unwrapped model for perplexity)
+    # Quality evaluation (unwrapped model for perplexity)
     quality_results = measure_quality_comprehensive(
         baseline_model, 
         quantized_model,  # ← Changed from optimized_model
@@ -478,26 +472,8 @@ def demo_production_ready(model_name="gpt2"):
             **opt_kwargs
         )
 
-    # Warmup
-    print("Warming up...")
-    with torch.no_grad():
-
-        # Building per-model kwargs (handles T5 vs GPT/OPT/Llama)*I hope*
-        base_kwargs = build_gen_kwargs(baseline_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
-        opt_kwargs  = build_gen_kwargs(optimized_model, tokenizer, inputs, max_new_tokens=50, do_sample=True, temperature=0.8)
-
-        _ = baseline_model.generate(
-            inputs["input_ids"],
-            attention_mask=inputs.get("attention_mask"),
-            **base_kwargs
-        )
-        _ = optimized_model.generate(
-            inputs["input_ids"],
-            attention_mask=inputs.get("attention_mask"),
-            **opt_kwargs
-        )
     
-    # Time original
+    #time original
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     start = time.perf_counter()
@@ -509,7 +485,7 @@ def demo_production_ready(model_name="gpt2"):
         )
     original_time = time.perf_counter() - start
     
-    # Time optimized
+    #time optimized
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     start = time.perf_counter()
@@ -524,7 +500,7 @@ def demo_production_ready(model_name="gpt2"):
     latency_ratio_opt_over_fp32 = (optimized_time / original_time) if original_time > 0 else float("inf")
     speedup_x = (1.0 / latency_ratio_opt_over_fp32) if latency_ratio_opt_over_fp32 > 0 else 0.0
 
-    # Results! Finally.
+    #Results! Finally.
     print(f"\n{'='*70}")
     print("RESULTS")
     print(f"{'='*70}")
@@ -561,7 +537,7 @@ def demo_production_ready(model_name="gpt2"):
         print(f"  Perplexity change: {quality_results['perplexity_degradation_pct']:+.1f}%")
     print(f"  Rating: {quality_results['quality_rating']}")
 
-    # Checking for repetitions
+    #checking for repetitions
     words = optimized_text.split()
     repetitions = 0
     for i in range(len(words) - 2):
@@ -573,7 +549,7 @@ def demo_production_ready(model_name="gpt2"):
     else:
         print(f"\n  [WARNING] Quality: {repetitions} repetitive patterns detected")
     
-    # Performance summary!
+    #erformance summary!
     print(f"\n{'='*70}")
     print("PERFORMANCE SUMMARY")
     print(f"{'='*70}")
@@ -595,8 +571,8 @@ def demo_production_ready(model_name="gpt2"):
         'compression_ratio': (1 - compressed_size / original_size) * 100,
         'latency_seconds_fp32': original_time,
         'latency_seconds_quant': optimized_time,
-        'latency_ratio_opt_over_fp32': latency_ratio_opt_over_fp32,  # lower is better
-        'speedup_x': speedup_x,                                      # higher is better
+        'latency_ratio_opt_over_fp32': latency_ratio_opt_over_fp32,  #lower is better
+        'speedup_x': speedup_x,                                      #higher is better
         'layer_stats': layer_stats,
         'has_repetitions': repetitions > 0,
         'perplexity_baseline': quality_results['perplexity_baseline'],
@@ -623,11 +599,10 @@ if __name__ == "__main__":
     import os
 
     os.makedirs("results", exist_ok=True)
-     # individual result
     with open(f"results/{model_name.replace('/', '_')}.json", "w") as f:
         json.dump(results, f, indent=2)
     
-    # master results file
+
     results_file = "results/all_results.json"
     if os.path.exists(results_file):
         with open(results_file, "r") as f:
@@ -638,7 +613,7 @@ if __name__ == "__main__":
     all_results.append({
         "model": model_name,
         "compression": results['compression_ratio'],
-        "speedup": results.get('speedup_x'),  # use the >1× speedup
+        "speedup": results.get('speedup_x'),  # using the >1× speedup
         "latency_ratio": results.get('latency_ratio_opt_over_fp32'),
         "original_mb": results['original_size'],
         "compressed_mb": results['compressed_size'],

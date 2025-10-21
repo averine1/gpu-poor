@@ -5,10 +5,8 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="gpu-poor",
-    version="3.0.0",  
-    author="Averine",
-    author_email= "averine1556@outlook.com",  
-    description="Extreme LLM compression (50-79%) for CPU inference with zero quality loss",
+    version="3.0.0",   
+    description="INT8 quantization achieving 74% memory reduction with 0.90 BLEU score and 1.9% perplexity increase",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/averine1/gpu-poor",  
@@ -42,9 +40,10 @@ setup(
         "benchmark": [
             "psutil>=5.9.0",  
             "matplotlib>=3.5.0",
+            "nltk>=3.8.0",
         ],
     },
-    keywords="llm quantization compression cpu-inference transformers pytorch int4 int8",
+    keywords="llm quantization compression cpu-inference transformers pytorch int8",
     project_urls={
         "Bug Reports": "https://github.com/averine1/gpu-poor/issues",
         "Source": "https://github.com/averine1/gpu-poor",
