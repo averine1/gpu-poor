@@ -52,7 +52,7 @@ gpu-poor uses INT8 quantization to compress large models by 74% with minimal qua
 
 ## Quality Metrics
 
-![Quality Evaluation](results/charts/quality.png)
+![Quality Evaluation](assets/quality.png)
 
 ### BLEU Score: 0.900
 
